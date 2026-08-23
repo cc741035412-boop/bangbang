@@ -133,7 +133,7 @@ flowchart LR
 
 教师点击“确认记录”后：
 
-- 状态从 `draft` 变为 `confirmed`。
+- 状态从 `ready_for_review` 变为 `confirmed`。
 - 记录进入观察记录库。
 - 页面注明确认人和确认时间。
 - AI 不得自动完成这一步。
@@ -192,20 +192,18 @@ MVP 只提供查看，不在详情页加入期末汇编与导出。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> uploading: 选择并提交素材
-    uploading --> processing: 上传成功
-    uploading --> upload_failed: 上传失败
-    upload_failed --> uploading: 教师重试
-    processing --> review_required: AI 整理完成
-    processing --> process_failed: 处理失败
-    process_failed --> processing: 重试处理
-    review_required --> draft: 教师开始核对或保存草稿
-    draft --> draft: 继续编辑
-    draft --> confirmed: 教师明确确认
+    [*] --> uploaded: 素材已上传并绑定
+    uploaded --> processing: 调用 AI 生成
+    processing --> ready_for_review: AI 整理完成
+    processing --> failed: AI 处理失败
+    failed --> processing: 教师重试
+    ready_for_review --> confirmed: 教师明确确认
     confirmed --> [*]
 ```
 
-当前后端已有 `draft` 和 `confirmed`，但尚未完整表达上传失败、处理中、处理失败和待确认状态。MVP 原型可以先在前端组合现有媒体与观察记录状态进行演示；正式实现前需要单独评估状态字段是否需要扩展。涉及数据库结构变更时必须先说明影响并走迁移脚本。
+后端使用五个状态：`uploaded`、`processing`、`ready_for_review`、`confirmed`、`failed`。合法流转只有 `uploaded → processing → ready_for_review → confirmed`、`processing → failed` 和 `failed → processing`（重试），状态只能由对应后端接口推进。
+
+阶段时间戳只记录事实，不在业务代码中存储差值：`processing_started_at` 记录开始处理时间，`ready_at` 记录进入待确认时间，`confirmed_at` 记录教师确认时间，失败原因写入 `failure_reason`；`created_at` 为记录创建时间。`ready_at - created_at` 用于计算“素材到可用记录耗时”，目标不超过 3 分钟；`confirmed_at - ready_at` 用于计算教师确认耗时。
 
 ## 6. API 对应关系
 

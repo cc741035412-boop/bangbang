@@ -86,6 +86,69 @@ ObservationStatus = Literal[
     "failed",
 ]
 
+
+class ObservationResponse(BaseModel):
+    """观察记录公开响应；状态与阶段时间戳由后端维护。"""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    child_id: int
+    area_id: int
+    classroom_id: Optional[int] = None
+    observed_at: datetime
+    age_group: str
+    media_type: str
+    purpose: Optional[str] = None
+    narrative: Optional[str] = None
+    analysis: Optional[str] = None
+    strategy: Optional[str] = None
+    narrative_source: Optional[str] = None
+    narrative_ai_raw: Optional[str] = None
+    status: ObservationStatus
+    created_at: Optional[datetime] = None
+    processing_started_at: Optional[datetime] = None
+    ready_at: Optional[datetime] = None
+    confirmed_at: Optional[datetime] = None
+    failure_reason: Optional[str] = None
+
+
+class ObservationTagResponse(BaseModel):
+    """观察指标响应；保留 AI 建议采纳率所需的原始字段。"""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    observation_id: int
+    indicator_code: str
+    indicator_name: str
+    level: int
+    source: str
+    accepted: Optional[bool] = None
+    confidence: Optional[float] = None
+    ai_reason: Optional[str] = None
+    rank_in_suggestion: Optional[int] = None
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+
+
+class MediaResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    stored_filename: str
+    content_type: str
+    size: int
+    duration_sec: Optional[int] = None
+    observation_id: Optional[int] = None
+    uploaded_at: datetime
+
+
+class ObservationDetailResponse(ObservationResponse):
+    child_name: Optional[str] = None
+    classroom_name: Optional[str] = None
+    area_name: Optional[str] = None
+    media: List[MediaResponse]
+    tags: List[ObservationTagResponse]
+
 ALLOWED_STATUS_TRANSITIONS = {
     "uploaded": {"processing"},
     "processing": {"ready_for_review", "failed"},
@@ -232,7 +295,11 @@ def create_observation(payload: ObservationCreate):
         return observation
 
 
-@app.get("/observations", tags=["2·观察记录"])
+@app.get(
+    "/observations",
+    response_model=List[ObservationResponse],
+    tags=["2·观察记录"],
+)
 def list_observations(
     status: Optional[ObservationStatus] = Query(None, description="按处理状态过滤"),
 ):
@@ -554,7 +621,11 @@ def add_tag_by_teacher(obs_id: int, payload: TagCreate):
 # 5. 完整记录 & 指标
 # ============================================================
 
-@app.get("/observations/{obs_id}", tags=["5·成果"])
+@app.get(
+    "/observations/{obs_id}",
+    response_model=ObservationDetailResponse,
+    tags=["5·成果"],
+)
 def get_observation_detail(obs_id: int):
     """一条观察记录的完整内容：四段正文 + 素材 + 已采纳的指标"""
     with Session(engine) as s:
@@ -570,42 +641,14 @@ def get_observation_detail(obs_id: int):
             select(ObservationTag).where(ObservationTag.observation_id == obs_id)
         ).all()
 
-        return {
-            "id": obs.id,
-            "状态": {
-                "uploaded": "已上传",
-                "processing": "AI 处理中",
-                "ready_for_review": "待教师确认",
-                "confirmed": "已确认",
-                "failed": "AI 处理失败",
-            }.get(obs.status, obs.status),
-            "观察对象": child.name if child else None,
-            "班级": room.name if room else None,
-            "年龄段": {"small": "小班", "middle": "中班", "large": "大班"}.get(obs.age_group, obs.age_group),
-            "观察地点": area.name if area else None,
-            "观察时间": obs.observed_at,
-            "观察目的": obs.purpose,
-            "观察描述": obs.narrative,
-            "白描来源": {"ai": "AI 生成", "ai_edited": "AI 生成后教师修改", "manual": "教师手写"}.get(obs.narrative_source),
-            "观察分析": obs.analysis,
-            "措施": obs.strategy,
-            "已采纳指标": [
-                {
-                    "编号": t.indicator_code,
-                    "名称": t.indicator_name,
-                    "层级": {1: "初阶", 2: "中阶", 3: "高阶"}[t.level],
-                    "行为描述": level_desc(t.indicator_code, t.level),
-                    "来源": "AI 建议" if t.source == "ai_suggested" else "教师补充",
-                }
-                for t in tags if t.accepted is True
-            ],
-            "素材": [{"文件名": m.stored_filename, "类型": m.content_type,
-                     "时长秒": m.duration_sec} for m in media],
-            "确认时间": obs.confirmed_at,
-            "处理开始时间": obs.processing_started_at,
-            "待确认时间": obs.ready_at,
-            "失败原因": obs.failure_reason,
-        }
+        return ObservationDetailResponse(
+            **obs.model_dump(),
+            child_name=child.name if child else None,
+            classroom_name=room.name if room else None,
+            area_name=area.name if area else None,
+            media=media,
+            tags=tags,
+        )
 
 
 @app.get("/metrics/ai-quality", tags=["5·成果"])

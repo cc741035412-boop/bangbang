@@ -130,13 +130,13 @@ export interface paths {
         };
         /**
          * List Observations
-         * @description 所有观察记录（简要）
+         * @description 所有观察记录（简要），可按状态过滤。
          */
         get: operations["list_observations_observations_get"];
         put?: never;
         /**
          * Create Observation
-         * @description 新建一条观察记录草稿
+         * @description 新建观察记录；状态固定由后端初始化为 uploaded。
          */
         post: operations["create_observation_observations_post"];
         delete?: never;
@@ -340,10 +340,48 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /** Observation */
-        Observation: {
+        /** MediaResponse */
+        MediaResponse: {
             /** Id */
-            id?: number | null;
+            id: number;
+            /** Stored Filename */
+            stored_filename: string;
+            /** Content Type */
+            content_type: string;
+            /** Size */
+            size: number;
+            /** Duration Sec */
+            duration_sec?: number | null;
+            /** Observation Id */
+            observation_id?: number | null;
+            /**
+             * Uploaded At
+             * Format: date-time
+             */
+            uploaded_at: string;
+        };
+        /**
+         * ObservationCreate
+         * @description 新建观察记录。状态与阶段时间戳只由后端维护。
+         */
+        ObservationCreate: {
+            /** Child Id */
+            child_id: number;
+            /** Area Id */
+            area_id: number;
+            /** Age Group */
+            age_group: string;
+            /** Media Type */
+            media_type: string;
+            /** Observed At */
+            observed_at?: string | null;
+            /** Purpose */
+            purpose?: string | null;
+        };
+        /** ObservationDetailResponse */
+        ObservationDetailResponse: {
+            /** Id */
+            id: number;
             /** Child Id */
             child_id: number;
             /** Area Id */
@@ -354,7 +392,7 @@ export interface components {
              * Observed At
              * Format: date-time
              */
-            observed_at?: string;
+            observed_at: string;
             /** Age Group */
             age_group: string;
             /** Media Type */
@@ -373,16 +411,112 @@ export interface components {
             narrative_ai_raw?: string | null;
             /**
              * Status
-             * @default draft
+             * @enum {string}
              */
-            status: string;
+            status: "uploaded" | "processing" | "ready_for_review" | "confirmed" | "failed";
+            /** Created At */
+            created_at?: string | null;
+            /** Processing Started At */
+            processing_started_at?: string | null;
+            /** Ready At */
+            ready_at?: string | null;
+            /** Confirmed At */
+            confirmed_at?: string | null;
+            /** Failure Reason */
+            failure_reason?: string | null;
+            /** Child Name */
+            child_name?: string | null;
+            /** Classroom Name */
+            classroom_name?: string | null;
+            /** Area Name */
+            area_name?: string | null;
+            /** Media */
+            media: components["schemas"]["MediaResponse"][];
+            /** Tags */
+            tags: components["schemas"]["ObservationTagResponse"][];
+        };
+        /**
+         * ObservationResponse
+         * @description 观察记录公开响应；状态与阶段时间戳由后端维护。
+         */
+        ObservationResponse: {
+            /** Id */
+            id: number;
+            /** Child Id */
+            child_id: number;
+            /** Area Id */
+            area_id: number;
+            /** Classroom Id */
+            classroom_id?: number | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Age Group */
+            age_group: string;
+            /** Media Type */
+            media_type: string;
+            /** Purpose */
+            purpose?: string | null;
+            /** Narrative */
+            narrative?: string | null;
+            /** Analysis */
+            analysis?: string | null;
+            /** Strategy */
+            strategy?: string | null;
+            /** Narrative Source */
+            narrative_source?: string | null;
+            /** Narrative Ai Raw */
+            narrative_ai_raw?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "uploaded" | "processing" | "ready_for_review" | "confirmed" | "failed";
+            /** Created At */
+            created_at?: string | null;
+            /** Processing Started At */
+            processing_started_at?: string | null;
+            /** Ready At */
+            ready_at?: string | null;
+            /** Confirmed At */
+            confirmed_at?: string | null;
+            /** Failure Reason */
+            failure_reason?: string | null;
+        };
+        /**
+         * ObservationTagResponse
+         * @description 观察指标响应；保留 AI 建议采纳率所需的原始字段。
+         */
+        ObservationTagResponse: {
+            /** Id */
+            id: number;
+            /** Observation Id */
+            observation_id: number;
+            /** Indicator Code */
+            indicator_code: string;
+            /** Indicator Name */
+            indicator_name: string;
+            /** Level */
+            level: number;
+            /** Source */
+            source: string;
+            /** Accepted */
+            accepted?: boolean | null;
+            /** Confidence */
+            confidence?: number | null;
+            /** Ai Reason */
+            ai_reason?: string | null;
+            /** Rank In Suggestion */
+            rank_in_suggestion?: number | null;
             /**
              * Created At
              * Format: date-time
              */
-            created_at?: string;
-            /** Confirmed At */
-            confirmed_at?: string | null;
+            created_at: string;
+            /** Resolved At */
+            resolved_at?: string | null;
         };
         /**
          * ObservationUpdate
@@ -578,7 +712,10 @@ export interface operations {
     };
     list_observations_observations_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 按处理状态过滤 */
+                status?: ("uploaded" | "processing" | "ready_for_review" | "confirmed" | "failed") | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -591,7 +728,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ObservationResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -605,7 +751,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Observation"];
+                "application/json": components["schemas"]["ObservationCreate"];
             };
         };
         responses: {
@@ -680,7 +826,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ObservationDetailResponse"];
                 };
             };
             /** @description Validation Error */
