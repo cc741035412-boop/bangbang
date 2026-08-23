@@ -5,6 +5,7 @@ import type { components } from "../../api/generated/schema";
 
 export type Observation = components["schemas"]["ObservationResponse"];
 export type ObservationDetail = components["schemas"]["ObservationDetailResponse"];
+export type ObservationTag = components["schemas"]["ObservationTagResponse"];
 export interface Area { id: number; code: string; name: string }
 export interface Child { id: number; name: string; classroom_id: number }
 export interface Media {
@@ -35,6 +36,35 @@ export interface NarrativeGenerationResult {
   is_mock: boolean;
   engine: string;
   notice: string;
+}
+
+export interface SuggestedIndicator {
+  tag_id: number;
+  indicator_code: string;
+  indicator_name: string;
+  level: number;
+  level_desc: string;
+  confidence: number;
+  reason: string;
+  rank: number;
+}
+
+export interface SystemDetermination {
+  tag_id: number;
+  indicator_code: string;
+  indicator_name: string;
+  level: number;
+  level_desc: string;
+  basis: string;
+  deterministic: true;
+  accepted: boolean;
+}
+
+export interface SuggestTagsResult {
+  observation_id: number;
+  suggestions: SuggestedIndicator[];
+  quant_hits: SystemDetermination[];
+  is_mock: boolean;
 }
 
 function ensureArray<T>(data: unknown, resourceName: string): T[] {
@@ -153,6 +183,65 @@ export function useSaveNarrative(id: number) {
       queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
         current?.map((item) => item.id === id ? { ...item, ...saved } : item)
       ));
+    },
+  });
+}
+
+export function useSuggestTags(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await apiClient.POST("/observations/{obs_id}/suggest-tags", {
+        params: { path: { obs_id: id } },
+      });
+      if (error || !data) throw new Error("候选指标暂时没有生成成功");
+      return data as SuggestTagsResult;
+    },
+    onSuccess: (result) => {
+      if (result.is_mock) sessionStorage.setItem(`tags-are-mock:${id}`, "true");
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
+    },
+  });
+}
+
+export function useDecideTag(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ accepted, tagId }: { accepted: boolean; tagId: number }) => {
+      const { data, error } = await apiClient.PATCH(
+        "/observations/{obs_id}/tags/{tag_id}",
+        {
+          params: { path: { obs_id: id, tag_id: tagId } },
+          body: { accepted },
+        },
+      );
+      if (error || !data) throw new Error("这次选择没有保存成功");
+      return { accepted, tagId };
+    },
+    onMutate: async ({ accepted, tagId }) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.observation(id) });
+      const previous = queryClient.getQueryData<ObservationDetail>(queryKeys.observation(id));
+      queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+        current
+          ? {
+              ...current,
+              tags: current.tags.map((tag) => (
+                tag.id === tagId ? { ...tag, accepted } : tag
+              )),
+            }
+          : current
+      ));
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.observation(id), context.previous);
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
     },
   });
 }

@@ -99,7 +99,7 @@ class ObservationTag(SQLModel, table=True):
     level: int             # 1=初阶 / 2=中阶 / 3=高阶
 
     # ↓↓↓ 这三个字段是"AI 候选采纳率"的唯一数据来源，一个都不能少 ↓↓↓
-    source: str                        # ai_suggested=AI建议的 / teacher_added=教师自己加的
+    source: str                        # ai_suggested / system_determined / teacher_added
     accepted: Optional[bool] = None    # None=还没处理 / True=采纳 / False=否掉
     confidence: Optional[float] = None # AI 的置信度，0~1
 

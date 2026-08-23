@@ -675,8 +675,9 @@ def suggest_tags(obs_id: int):
     """
     【AI 工作流 B】根据白描 + 区域 + 年龄段，推荐 2-3 个候选指标。
 
-    候选会立刻落库为 source=ai_suggested、accepted=None（未处理），
-    等教师逐条采纳或否掉。这是「AI 候选采纳率」能被统计的前提。
+    系统判定与 AI 建议分别落库：
+    - quant_hits → source=system_determined、accepted=True（默认选中）
+    - suggestions → source=ai_suggested、accepted=None（等待教师决定）
     """
     with Session(engine) as s:
         obs = s.get(Observation, obs_id)
@@ -695,6 +696,46 @@ def suggest_tags(obs_id: int):
 
         area = s.get(Area, obs.area_id)
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).first()
+
+        existing_candidates = s.exec(
+            select(ObservationTag).where(
+                ObservationTag.observation_id == obs_id,
+                ObservationTag.source.in_({"system_determined", "ai_suggested"}),
+            )
+        ).all()
+        if existing_candidates:
+            system_tags = [t for t in existing_candidates if t.source == "system_determined"]
+            ai_tags = [t for t in existing_candidates if t.source == "ai_suggested"]
+            return {
+                "observation_id": obs_id,
+                "status": obs.status,
+                "processing_started_at": obs.processing_started_at,
+                "ready_at": obs.ready_at,
+                "suggestions": [{
+                    "tag_id": tag.id,
+                    "indicator_code": tag.indicator_code,
+                    "indicator_name": tag.indicator_name,
+                    "level": tag.level,
+                    "level_desc": level_desc(tag.indicator_code, tag.level),
+                    "confidence": tag.confidence,
+                    "reason": tag.ai_reason,
+                    "rank": tag.rank_in_suggestion,
+                } for tag in ai_tags],
+                "quant_hits": [{
+                    "tag_id": tag.id,
+                    "indicator_code": tag.indicator_code,
+                    "indicator_name": tag.indicator_name,
+                    "level": tag.level,
+                    "level_desc": level_desc(tag.indicator_code, tag.level),
+                    "basis": tag.ai_reason,
+                    "deterministic": True,
+                    "accepted": tag.accepted,
+                } for tag in system_tags],
+                "is_mock": True,
+                "engine": "persisted-candidates",
+                "notice": "返回已保存的候选指标，未重复生成。",
+                "hint": "quant_hits 是纯计算命中（如视频时长），不走模型，界面上应标为「系统判定」而非「AI 建议」。",
+            }
 
         # 同一条记录重复调用时，先清掉上一轮还没处理的 AI 候选
         old = s.exec(
@@ -724,6 +765,30 @@ def suggest_tags(obs_id: int):
             s.add(obs)
             s.commit()
             raise HTTPException(500, obs.failure_reason) from exc
+
+        saved_quant_hits = []
+        for hit in result["quant_hits"]:
+            tag = ObservationTag(
+                observation_id=obs_id,
+                indicator_code=hit["indicator_code"],
+                indicator_name=hit["indicator_name"],
+                level=hit["level"],
+                source="system_determined",
+                accepted=True,
+                ai_reason=hit["basis"],
+            )
+            s.add(tag)
+            s.flush()
+            saved_quant_hits.append({
+                "tag_id": tag.id,
+                "indicator_code": tag.indicator_code,
+                "indicator_name": tag.indicator_name,
+                "level": tag.level,
+                "level_desc": hit["level_desc"],
+                "basis": hit["basis"],
+                "deterministic": True,
+                "accepted": tag.accepted,
+            })
 
         saved = []
         for sug in result["suggestions"]:
@@ -763,7 +828,7 @@ def suggest_tags(obs_id: int):
             "processing_started_at": obs.processing_started_at,
             "ready_at": obs.ready_at,
             "suggestions": saved,
-            "quant_hits": result["quant_hits"],
+            "quant_hits": saved_quant_hits,
             "is_mock": result["is_mock"],
             "engine": result["engine"],
             "notice": result["notice"],
@@ -787,8 +852,8 @@ def list_tags(obs_id: int):
 @app.patch("/observations/{obs_id}/tags/{tag_id}", tags=["4·教师确认"])
 def decide_tag(obs_id: int, tag_id: int, decision: TagDecision):
     """
-    教师采纳或否掉一条 AI 候选。
-    这一下写入的 accepted 字段，就是「AI 候选采纳率」的数据来源。
+    教师采纳或否掉一条 AI 候选，或取消 / 恢复一条系统判定。
+    AI 建议的 accepted 字段是「AI 候选采纳率」的数据来源。
     """
     with Session(engine) as s:
         tag = s.get(ObservationTag, tag_id)
@@ -886,7 +951,11 @@ def ai_quality():
     resolved = [t for t in ai_tags if t.accepted is not None]
     accepted = [t for t in resolved if t.accepted]
     teacher_added = [t for t in tags if t.source == "teacher_added"]
-    all_accepted = [t for t in tags if t.accepted is True]
+    # 系统纯计算判定不属于 AI 猜测，不能稀释 AI 漏检率。
+    all_accepted = [
+        t for t in tags
+        if t.source in {"ai_suggested", "teacher_added"} and t.accepted is True
+    ]
 
     by_dim = {}
     for t in resolved:

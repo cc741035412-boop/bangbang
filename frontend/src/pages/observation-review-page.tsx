@@ -2,12 +2,15 @@ import { ArrowLeft, LoaderCircle, RotateCcw, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
+import { CandidateIndicators } from "../components/candidate-indicators";
 import { MediaThumbnail } from "../components/media-thumbnail";
 import { MobilePage } from "../components/mobile-page";
 import {
   useGenerateNarrative,
+  useDecideTag,
   useObservation,
   useSaveNarrative,
+  useSuggestTags,
 } from "../features/observations/api";
 import { formatKindergartenTime } from "../lib/date-time";
 
@@ -24,10 +27,16 @@ export function ObservationReviewPage() {
   const observation = useObservation(id);
   const generation = useGenerateNarrative(id);
   const saveNarrative = useSaveNarrative(id);
+  const suggestTags = useSuggestTags(id);
+  const decideTag = useDecideTag(id);
   const [draft, setDraft] = useState("");
   const initializedKey = useRef("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const record = observation.data;
+  const candidateTags = record?.tags.filter((tag) => (
+    tag.source === "system_determined" || tag.source === "ai_suggested"
+  )) ?? [];
+  const showIndicators = candidateTags.length > 0 || suggestTags.isSuccess;
 
   useEffect(() => {
     if (!record || record.status !== "ready_for_review") return;
@@ -56,6 +65,20 @@ export function ObservationReviewPage() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = null;
     save(draft);
+  }
+
+  async function continueToIndicators() {
+    if (!record) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    try {
+      if (draft !== (record.narrative ?? "")) {
+        await saveNarrative.mutateAsync(draft);
+      }
+      suggestTags.mutate();
+    } catch {
+      // 保存错误已由页面状态提示；白描未落库时不能基于旧内容生成候选。
+    }
   }
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -135,7 +158,7 @@ export function ObservationReviewPage() {
           </section>
         )}
 
-        {record.status === "ready_for_review" && (
+        {record.status === "ready_for_review" && !showIndicators && (
           <section>
             <label className="block text-sm font-bold text-ink-muted" htmlFor="narrative">
               AI 生成的客观白描，请核对后修改
@@ -156,6 +179,13 @@ export function ObservationReviewPage() {
               <p className="mt-3 text-xs leading-5 text-stone-500">⚠️ 当前为演示数据，尚未接入真实 AI</p>
             )}
           </section>
+        )}
+
+        {record.status === "ready_for_review" && showIndicators && (
+          <CandidateIndicators
+            onDecide={(tagId, accepted) => decideTag.mutate({ tagId, accepted })}
+            tags={candidateTags}
+          />
         )}
 
         {record.status === "failed" && (
@@ -183,11 +213,24 @@ export function ObservationReviewPage() {
         {generation.isError && record.status !== "failed" && (
           <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">这次没有整理成功，请重新试一次</p>
         )}
+        {suggestTags.isError && (
+          <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">候选指标暂时没有生成成功，请点“下一步”重试</p>
+        )}
+        {decideTag.isError && (
+          <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">这次选择没有保存成功，请再点一次</p>
+        )}
       </div>
 
-      {record.status === "ready_for_review" && (
+      {record.status === "ready_for_review" && !showIndicators && (
         <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
-          <button className="min-h-14 w-full rounded-2xl bg-stone-200 text-lg font-bold text-stone-400" disabled type="button">下一步</button>
+          <button
+            className="min-h-14 w-full rounded-2xl bg-brand text-lg font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            disabled={!draft.trim() || saveNarrative.isPending || suggestTags.isPending}
+            onClick={() => void continueToIndicators()}
+            type="button"
+          >
+            {suggestTags.isPending ? "正在生成候选…" : "下一步"}
+          </button>
         </div>
       )}
     </MobilePage>

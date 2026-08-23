@@ -283,8 +283,9 @@ export interface paths {
          * Suggest Tags
          * @description 【AI 工作流 B】根据白描 + 区域 + 年龄段，推荐 2-3 个候选指标。
          *
-         *     候选会立刻落库为 source=ai_suggested、accepted=None（未处理），
-         *     等教师逐条采纳或否掉。这是「AI 候选采纳率」能被统计的前提。
+         *     系统判定与 AI 建议分别落库：
+         *     - quant_hits → source=system_determined、accepted=True（默认选中）
+         *     - suggestions → source=ai_suggested、accepted=None（等待教师决定）
          */
         post: operations["suggest_tags_observations__obs_id__suggest_tags_post"];
         delete?: never;
@@ -333,8 +334,8 @@ export interface paths {
         head?: never;
         /**
          * Decide Tag
-         * @description 教师采纳或否掉一条 AI 候选。
-         *     这一下写入的 accepted 字段，就是「AI 候选采纳率」的数据来源。
+         * @description 教师采纳或否掉一条 AI 候选，或取消 / 恢复一条系统判定。
+         *     AI 建议的 accepted 字段是「AI 候选采纳率」的数据来源。
          */
         patch: operations["decide_tag_observations__obs_id__tags__tag_id__patch"];
         trace?: never;

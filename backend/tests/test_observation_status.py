@@ -103,6 +103,26 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(suggestions.json()["status"], "ready_for_review")
         self.assertIsNotNone(suggestions.json()["ready_at"])
         self.assertTrue(suggestions.json()["suggestions"])
+        self.assertTrue(suggestions.json()["quant_hits"])
+
+        detail_with_tags = self.client.get(f"/observations/{observation_id}").json()
+        system_tags = [
+            tag for tag in detail_with_tags["tags"]
+            if tag["source"] == "system_determined"
+        ]
+        self.assertTrue(system_tags)
+        self.assertTrue(all(tag["accepted"] is True for tag in system_tags))
+
+        cancelled_system = self.client.patch(
+            f"/observations/{observation_id}/tags/{system_tags[0]['id']}",
+            json={"accepted": False},
+        )
+        self.assertEqual(cancelled_system.status_code, 200)
+        restored_detail = self.client.get(f"/observations/{observation_id}").json()
+        restored_system = next(
+            tag for tag in restored_detail["tags"] if tag["id"] == system_tags[0]["id"]
+        )
+        self.assertFalse(restored_system["accepted"])
 
         update_context = self.client.patch(
             f"/observations/{observation_id}",
@@ -123,6 +143,19 @@ class ObservationStatusFlowTest(unittest.TestCase):
             json={"accepted": True},
         )
         self.assertEqual(decision.status_code, 200)
+
+        second_tag_id = suggestions.json()["suggestions"][1]["tag_id"]
+        rejected = self.client.patch(
+            f"/observations/{observation_id}/tags/{second_tag_id}",
+            json={"accepted": False},
+        )
+        self.assertEqual(rejected.status_code, 200)
+
+        metrics = self.client.get("/metrics/ai-quality").json()
+        self.assertEqual(metrics["AI建议总数"], 3)
+        self.assertEqual(metrics["教师已处理"], 2)
+        self.assertEqual(metrics["教师采纳"], 1)
+        self.assertEqual(metrics["采纳率"], 0.5)
 
         confirmed = self.client.post(f"/observations/{observation_id}/confirm")
         self.assertEqual(confirmed.status_code, 200)
