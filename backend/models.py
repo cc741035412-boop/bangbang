@@ -1,6 +1,6 @@
-from typing import Optional
+from typing import Dict, Optional
 from datetime import datetime
-from sqlalchemy import Column
+from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field, create_engine
 from config import DATABASE_PATH
 from time_utils import UTCDateTime, utc_now
@@ -89,10 +89,46 @@ class Media(SQLModel, table=True):
     )
 
 
-# ========== 表6：指标标注（本项目最重要的一张表）==========
+# ========== 表6：AI 调用记录 ==========
+class AIRun(SQLModel, table=True):
+    """一次 AI 工作流调用的完整审计记录。"""
+
+    __tablename__ = "ai_run"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    observation_id: int = Field(foreign_key="observation.id")
+    workflow: str
+    provider: str
+    model: str
+    prompt_version: str
+    status: str
+    started_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+    completed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    latency_ms: Optional[int] = None
+    response_raw: Optional[Dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+    error_reason: Optional[str] = None
+    is_mock: bool = True
+    prompt_rendered: str
+    token_usage: Optional[Dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+
+
+# ========== 表7：指标标注（本项目最重要的一张表）==========
 class ObservationTag(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     observation_id: int = Field(foreign_key="observation.id")
+    ai_run_id: Optional[int] = Field(default=None, foreign_key="ai_run.id")
 
     indicator_code: str    # 如 "1.3"
     indicator_name: str    # 如 "身体行为复杂性"

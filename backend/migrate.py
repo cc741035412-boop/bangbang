@@ -30,6 +30,10 @@ NEW_OBSERVATION_COLUMNS = [
     ("failure_reason",        "TEXT"),
 ]
 
+NEW_OBSERVATIONTAG_COLUMNS = [
+    ("ai_run_id", "INTEGER REFERENCES ai_run(id)"),
+]
+
 
 def backup_database():
     """任何结构或数据迁移前先创建带时间戳的数据库副本。"""
@@ -99,6 +103,28 @@ def add_missing_columns():
         print("② observation 表字段已齐全，无需改动")
 
 
+def add_missing_observationtag_columns():
+    """给 observationtag 表补充与 AI 调用记录的可空关联。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    existing = {row[1] for row in cur.execute("PRAGMA table_info(observationtag)")}
+
+    added = []
+    for col_name, col_type in NEW_OBSERVATIONTAG_COLUMNS:
+        if col_name in existing:
+            continue
+        cur.execute(f"ALTER TABLE observationtag ADD COLUMN {col_name} {col_type}")
+        added.append(col_name)
+
+    conn.commit()
+    conn.close()
+
+    if added:
+        print(f"③ observationtag 表新增字段：{'、'.join(added)}")
+    else:
+        print("③ observationtag 表字段已齐全，无需改动")
+
+
 def migrate_status_values():
     """把旧状态映射到新状态；已迁移数据重复运行不会变化。"""
     conn = sqlite3.connect(DB_FILE)
@@ -109,7 +135,7 @@ def migrate_status_values():
     migrated = cur.rowcount
     conn.commit()
     conn.close()
-    print(f"③ 状态迁移：draft → ready_for_review，共 {migrated} 条")
+    print(f"④ 状态迁移：draft → ready_for_review，共 {migrated} 条")
 
 
 def rebuild_observation_for_quick_capture():
@@ -124,7 +150,7 @@ def rebuild_observation_for_quick_capture():
     )
     if already_migrated:
         conn.close()
-        print("④ observation 可空约束已符合现场沉淀模型，无需重建")
+        print("⑤ observation 可空约束已符合现场沉淀模型，无需重建")
         return
 
     column_names = [
@@ -183,7 +209,7 @@ def rebuild_observation_for_quick_capture():
     conn.close()
     if foreign_key_errors:
         raise RuntimeError(f"迁移后外键检查失败：{foreign_key_errors}")
-    print("④ observation 已重建：child_id、media_type 改为可空，原数据已复制")
+    print("⑤ observation 已重建：child_id、media_type 改为可空，原数据已复制")
 
 
 def show_result():
@@ -192,9 +218,10 @@ def show_result():
     cur = conn.cursor()
 
     print("\n===== 迁移后的数据库 =====")
-    for (table,) in cur.execute(
+    tables = cur.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ):
+    ).fetchall()
+    for (table,) in tables:
         count = cur.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
         print(f"  {table:<18} {count} 行")
 
@@ -210,8 +237,9 @@ if __name__ == "__main__":
     observation_summary("迁移前")
     create_new_tables()
     add_missing_columns()
+    add_missing_observationtag_columns()
     migrate_status_values()
     rebuild_observation_for_quick_capture()
     observation_summary("迁移后")
     show_result()
-    print("\n✅ 迁移完成：observation 已按需重建，其他表结构未改")
+    print("\n✅ 迁移完成：ai_run 与 observationtag.ai_run_id 已按需创建")
