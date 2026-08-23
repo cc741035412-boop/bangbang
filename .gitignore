@@ -1,0 +1,30 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+bangbang.db
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+
+# Frontend
+node_modules/
+dist/
+.next/
+
+# Temporary workspace content
+work/*
+!work/.gitkeep
