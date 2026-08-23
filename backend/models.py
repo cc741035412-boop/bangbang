@@ -1,7 +1,9 @@
 from typing import Optional
 from datetime import datetime
+from sqlalchemy import Column
 from sqlmodel import SQLModel, Field, create_engine
 from config import DATABASE_PATH
+from time_utils import UTCDateTime, utc_now
 
 
 # ========== 表1：游戏区域 ==========
@@ -33,7 +35,10 @@ class Observation(SQLModel, table=True):
     area_id: int = Field(foreign_key="area.id")
     classroom_id: Optional[int] = Field(default=None, foreign_key="classroom.id")
 
-    observed_at: datetime = Field(default_factory=datetime.now)
+    observed_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
     age_group: str      # 快照：拍摄当时的年龄段。孩子会升班，历史记录的判定依据不能跟着变
     media_type: Optional[str] = None  # image / video；绑定首个素材时由 MIME 推断
 
@@ -51,10 +56,22 @@ class Observation(SQLModel, table=True):
     # uploaded → processing → ready_for_review → confirmed
     #                       ↘ failed → processing（重试）
     status: str = "uploaded"
-    created_at: datetime = Field(default_factory=datetime.now)
-    processing_started_at: Optional[datetime] = None
-    ready_at: Optional[datetime] = None
-    confirmed_at: Optional[datetime] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+    processing_started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    ready_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    confirmed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
     failure_reason: Optional[str] = None
 
 
@@ -66,7 +83,10 @@ class Media(SQLModel, table=True):
     size: int                             # 字节数
     duration_sec: Optional[int] = None    # 视频时长，指标 1.1 的层级分界靠它算，纯计算零幻觉
     observation_id: Optional[int] = Field(default=None, foreign_key="observation.id")
-    uploaded_at: datetime = Field(default_factory=datetime.now)
+    uploaded_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
 
 
 # ========== 表6：指标标注（本项目最重要的一张表）==========
@@ -85,8 +105,14 @@ class ObservationTag(SQLModel, table=True):
 
     ai_reason: Optional[str] = None          # AI 给的判断理由，让教师快速决定
     rank_in_suggestion: Optional[int] = None # AI 建议时排第几位
-    created_at: datetime = Field(default_factory=datetime.now)
-    resolved_at: Optional[datetime] = None   # 教师处理的时间
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+    resolved_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )  # 教师处理的时间
 
 
 # ========== 数据库连接 ==========

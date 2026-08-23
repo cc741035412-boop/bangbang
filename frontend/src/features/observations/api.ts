@@ -12,6 +12,7 @@ export interface Media {
   content_type: string;
   size: number;
   observation_id?: number | null;
+  thumbnail_failure_reason?: string | null;
 }
 
 export const MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024;
@@ -161,6 +162,10 @@ async function submitCapture({ file, areaId, progress, onUploadProgress }: Captu
 
 export function getMediaFileUrl(mediaId: number) {
   return `/api/media/${mediaId}/file`;
+}
+
+export function getMediaThumbnailUrl(mediaId: number) {
+  return `/api/media/${mediaId}/thumbnail`;
 }
 
 export function useSubmitCapture() {

@@ -13,6 +13,9 @@ from pathlib import Path
 from uuid import uuid4
 from datetime import datetime
 from typing import Optional, List, Literal
+import shutil
+import subprocess
+import tempfile
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -25,6 +28,7 @@ from models import (
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
 from config import DEFAULT_CLASSROOM_ID, UPLOAD_DIR
+from time_utils import utc_now
 import ai_service
 
 app = FastAPI(
@@ -54,6 +58,7 @@ EXTENSION_TYPES = {
 }
 FALLBACK_CONTENT_TYPES = {"", "application/octet-stream"}
 MAX_SIZE = 200 * 1024 * 1024  # 200MB
+THUMBNAIL_SIZE = 480
 
 
 # ============================================================
@@ -156,6 +161,7 @@ class MediaResponse(BaseModel):
     duration_sec: Optional[int] = None
     observation_id: Optional[int] = None
     uploaded_at: datetime
+    thumbnail_failure_reason: Optional[str] = None
 
 
 class ObservationDetailResponse(ObservationResponse):
@@ -196,7 +202,7 @@ def transition_observation(
 ):
     """执行合法状态流转并记录对应阶段时间戳。"""
     ensure_status_transition(obs, target_status)
-    now = datetime.now()
+    now = utc_now()
     obs.status = target_status
 
     if target_status == "processing":
@@ -222,6 +228,67 @@ def resolve_upload_type(file: UploadFile):
         return EXTENSION_TYPES[suffix], suffix
 
     raise HTTPException(400, "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）")
+
+
+def get_thumbnail_path(stored_filename: str) -> Path:
+    return UPLOAD_DIR / f"{stored_filename}.thumbnail.png"
+
+
+def get_thumbnail_error_path(stored_filename: str) -> Path:
+    return UPLOAD_DIR / f"{stored_filename}.thumbnail-error.txt"
+
+
+def get_thumbnail_failure_reason(stored_filename: str) -> Optional[str]:
+    if get_thumbnail_path(stored_filename).is_file():
+        return None
+    error_path = get_thumbnail_error_path(stored_filename)
+    if not error_path.is_file():
+        return None
+    return error_path.read_text(encoding="utf-8").strip() or "视频缩略图生成失败"
+
+
+def generate_video_thumbnail(source_path: Path) -> Optional[str]:
+    """使用 macOS 自带 Quick Look 抽取视频首帧；失败不影响素材保存。"""
+    thumbnail_path = get_thumbnail_path(source_path.name)
+    error_path = get_thumbnail_error_path(source_path.name)
+    qlmanage = shutil.which("qlmanage")
+
+    if not qlmanage:
+        reason = "当前服务器没有可用的视频抽帧工具"
+        error_path.write_text(reason, encoding="utf-8")
+        return reason
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="thumbnail-", dir=UPLOAD_DIR) as temp_dir:
+            result = subprocess.run(
+                [qlmanage, "-t", "-s", str(THUMBNAIL_SIZE), "-o", temp_dir, str(source_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            generated_path = Path(temp_dir) / f"{source_path.name}.png"
+            if result.returncode != 0 or not generated_path.is_file():
+                reason = "当前视频编码暂时无法生成缩略图"
+                error_path.write_text(reason, encoding="utf-8")
+                return reason
+            generated_path.replace(thumbnail_path)
+    except subprocess.TimeoutExpired:
+        reason = "视频缩略图生成超时"
+        error_path.write_text(reason, encoding="utf-8")
+        return reason
+    except OSError:
+        reason = "视频缩略图生成失败"
+        error_path.write_text(reason, encoding="utf-8")
+        return reason
+
+    return None
+
+
+def media_response(media: Media):
+    data = media.model_dump()
+    data["thumbnail_failure_reason"] = get_thumbnail_failure_reason(media.stored_filename)
+    return data
 
 
 # ============================================================
@@ -257,7 +324,12 @@ def list_indicators():
 # 1. 上传素材
 # ============================================================
 
-@app.post("/uploads", status_code=201, tags=["1·素材"])
+@app.post(
+    "/uploads",
+    status_code=201,
+    response_model=MediaResponse,
+    tags=["1·素材"],
+)
 async def upload_media(
     file: UploadFile = File(...),
     duration_sec: Optional[int] = Query(
@@ -281,6 +353,9 @@ async def upload_media(
         stored_path.unlink(missing_ok=True)
         raise
 
+    if content_type.startswith("video/"):
+        generate_video_thumbnail(stored_path)
+
     with Session(engine) as s:
         media = Media(
             stored_filename=stored_filename,
@@ -291,14 +366,14 @@ async def upload_media(
         s.add(media)
         s.commit()
         s.refresh(media)
-        return media
+        return media_response(media)
 
 
-@app.get("/media", tags=["1·素材"])
+@app.get("/media", response_model=List[MediaResponse], tags=["1·素材"])
 def list_media():
     """所有已上传的素材"""
     with Session(engine) as s:
-        return s.exec(select(Media)).all()
+        return [media_response(media) for media in s.exec(select(Media)).all()]
 
 
 @app.get(
@@ -333,6 +408,47 @@ def get_media_file(media_id: int):
             raise HTTPException(404, "素材文件不存在")
 
         return FileResponse(stored_path, media_type=media.content_type)
+
+
+@app.get(
+    "/media/{media_id}/thumbnail",
+    response_class=FileResponse,
+    responses={
+        200: {"description": "视频缩略图", "content": {"image/png": {}}},
+        404: {"description": "缩略图不可用，响应包含失败原因"},
+    },
+    tags=["1·素材"],
+)
+def get_media_thumbnail(media_id: int):
+    """返回服务端生成的视频缩略图；历史视频首次读取时补生成。"""
+    with Session(engine) as s:
+        media = s.get(Media, media_id)
+        if not media:
+            raise HTTPException(404, "素材不存在")
+        if not media.content_type.startswith("video/"):
+            raise HTTPException(400, "图片素材无需生成视频缩略图")
+        if Path(media.stored_filename).name != media.stored_filename:
+            raise HTTPException(404, "素材文件不存在")
+
+        source_path = UPLOAD_DIR / media.stored_filename
+        if not source_path.is_file():
+            raise HTTPException(404, "素材文件不存在")
+
+        thumbnail_path = get_thumbnail_path(media.stored_filename)
+        failure_reason = get_thumbnail_failure_reason(media.stored_filename)
+        if not thumbnail_path.is_file():
+            failure_reason = generate_video_thumbnail(source_path)
+
+        if thumbnail_path.is_file():
+            return FileResponse(thumbnail_path, media_type="image/png")
+
+        raise HTTPException(
+            404,
+            detail={
+                "message": "视频缩略图不可用",
+                "reason": failure_reason or "视频缩略图生成失败",
+            },
+        )
 
 
 # ============================================================
@@ -662,7 +778,7 @@ def decide_tag(obs_id: int, tag_id: int, decision: TagDecision):
             raise HTTPException(404, "标注不存在")
 
         tag.accepted = decision.accepted
-        tag.resolved_at = datetime.now()
+        tag.resolved_at = utc_now()
         s.add(tag)
         s.commit()
         s.refresh(tag)
@@ -694,7 +810,7 @@ def add_tag_by_teacher(obs_id: int, payload: TagCreate):
             level=payload.level,
             source="teacher_added",
             accepted=True,          # 教师自己加的，默认就是采纳
-            resolved_at=datetime.now(),
+            resolved_at=utc_now(),
         )
         s.add(tag)
         s.commit()

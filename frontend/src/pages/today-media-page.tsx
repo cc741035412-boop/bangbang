@@ -3,8 +3,19 @@ import { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 
 import { MobilePage } from "../components/mobile-page";
-import { getMediaFileUrl, type Media, useTodayMediaData } from "../features/observations/api";
+import {
+  getMediaFileUrl,
+  getMediaThumbnailUrl,
+  type Media,
+  useTodayMediaData,
+} from "../features/observations/api";
 import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
+import {
+  compareTimestampsDescending,
+  formatLocalTime,
+  formatLocalToday,
+  isLocalToday,
+} from "../lib/date-time";
 
 interface SuccessState { captureDuration?: number }
 
@@ -17,17 +28,13 @@ function MediaThumbnail({ media, isVideo }: { media?: Media; isVideo: boolean })
       : <ImageIcon aria-label="图片素材" size={28} strokeWidth={1.8} />;
   }
 
-  const fileUrl = getMediaFileUrl(media.id);
   if (isVideo) {
     return (
-      <video
-        aria-label="视频素材首帧"
+      <img
+        alt="视频缩略图"
         className="size-full object-cover"
-        muted
         onError={() => setHasError(true)}
-        playsInline
-        preload="metadata"
-        src={fileUrl}
+        src={getMediaThumbnailUrl(media.id)}
       />
     );
   }
@@ -37,34 +44,9 @@ function MediaThumbnail({ media, isVideo }: { media?: Media; isVideo: boolean })
       alt="素材缩略图"
       className="size-full object-cover"
       onError={() => setHasError(true)}
-      src={fileUrl}
+      src={getMediaFileUrl(media.id)}
     />
   );
-}
-
-function isToday(value?: string | null) {
-  if (!value) return false;
-  const date = new Date(value);
-  const today = new Date();
-  return date.getFullYear() === today.getFullYear()
-    && date.getMonth() === today.getMonth()
-    && date.getDate() === today.getDate();
-}
-
-function formatTime(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date(value));
-}
-
-function formatToday() {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  }).format(new Date());
 }
 
 export function TodayMediaPage() {
@@ -92,8 +74,8 @@ export function TodayMediaPage() {
   );
   const todayRecords = useMemo(() => (
     (observations.data ?? [])
-      .filter((item) => isToday(item.created_at))
-      .sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
+      .filter((item) => isLocalToday(item.created_at))
+      .sort((a, b) => compareTimestampsDescending(a.created_at, b.created_at))
   ), [observations.data]);
   const readyCount = todayRecords.filter((item) => item.status === "ready_for_review").length;
   const visibleRecords = onlyNeedsReview
@@ -107,7 +89,7 @@ export function TodayMediaPage() {
       <div className="px-5 pb-32 pt-7">
         <header className="mb-6 flex items-end justify-between gap-4">
           <div>
-            <p className="mb-1 text-sm font-medium text-ink-muted">{formatToday()}</p>
+            <p className="mb-1 text-sm font-medium text-ink-muted">{formatLocalToday()}</p>
             <h1 className="text-[30px] font-bold tracking-[-0.03em]">今日素材</h1>
           </div>
           {readyCount > 0 && (
@@ -172,7 +154,7 @@ export function TodayMediaPage() {
                 <div className="min-w-0 flex-1 py-1">
                   <div className="flex items-start justify-between gap-2">
                     <p className="truncate font-bold">
-                      {areaNames.get(record.area_id) ?? "未知区域"} · {formatTime(record.created_at ?? record.observed_at)}
+                      {areaNames.get(record.area_id) ?? "未知区域"} · {formatLocalTime(record.created_at ?? record.observed_at)}
                     </p>
                     <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${status.className}`}>
                       {status.label}

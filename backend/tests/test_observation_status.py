@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -273,6 +275,75 @@ class ObservationStatusFlowTest(unittest.TestCase):
             rejected.json()["detail"],
             "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）",
         )
+
+    def test_utc_timestamps_and_legacy_local_time_response(self):
+        created = self.client.post("/observations", json={"area_id": self.area_id})
+        self.assertEqual(created.status_code, 201)
+        created_at = created.json()["created_at"]
+        self.assertTrue(created_at.endswith("Z") or created_at.endswith("+00:00"))
+
+        with main.engine.begin() as connection:
+            stored = connection.execute(
+                text("SELECT created_at FROM observation WHERE id = :id"),
+                {"id": created.json()["id"]},
+            ).scalar_one()
+            self.assertTrue(stored.endswith("Z") or stored.endswith("+00:00"))
+            connection.execute(
+                text("UPDATE observation SET created_at = :created_at WHERE id = :id"),
+                {
+                    "id": created.json()["id"],
+                    "created_at": "2026-08-23 05:34:32.426166",
+                },
+            )
+
+        legacy = self.client.get(f"/observations/{created.json()['id']}")
+        self.assertEqual(legacy.status_code, 200)
+        expected = datetime(2026, 8, 23, 12, 34, 32, 426166, tzinfo=timezone.utc)
+        actual = datetime.fromisoformat(legacy.json()["created_at"].replace("Z", "+00:00"))
+        self.assertEqual(actual, expected)
+
+    def test_video_thumbnail_success_and_failure_reason(self):
+        def create_thumbnail(source_path):
+            main.get_thumbnail_path(source_path.name).write_bytes(b"mock-png")
+            return None
+
+        with patch.object(main, "generate_video_thumbnail", side_effect=create_thumbnail):
+            uploaded = self.client.post(
+                "/uploads",
+                files={"file": ("iphone.mov", b"mock-mov", "video/quicktime")},
+            )
+
+        self.assertEqual(uploaded.status_code, 201)
+        thumbnail = self.client.get(f"/media/{uploaded.json()['id']}/thumbnail")
+        self.assertEqual(thumbnail.status_code, 200)
+        self.assertEqual(thumbnail.headers["content-type"], "image/png")
+        self.assertEqual(thumbnail.content, b"mock-png")
+
+        def fail_thumbnail(source_path):
+            reason = "当前视频编码暂时无法生成缩略图"
+            main.get_thumbnail_error_path(source_path.name).write_text(reason, encoding="utf-8")
+            return reason
+
+        with patch.object(main, "generate_video_thumbnail", side_effect=fail_thumbnail):
+            failed_upload = self.client.post(
+                "/uploads",
+                files={"file": ("unsupported.mov", b"bad-codec", "video/quicktime")},
+            )
+        failed_media = failed_upload.json()
+        self.assertIsNotNone(failed_media["thumbnail_failure_reason"])
+        failed_thumbnail = self.client.get(f"/media/{failed_media['id']}/thumbnail")
+        self.assertEqual(failed_thumbnail.status_code, 404)
+        self.assertEqual(
+            failed_thumbnail.json()["detail"]["reason"],
+            failed_media["thumbnail_failure_reason"],
+        )
+
+        with patch.object(main, "generate_video_thumbnail", side_effect=create_thumbnail):
+            retried_thumbnail = self.client.get(f"/media/{failed_media['id']}/thumbnail")
+        self.assertEqual(retried_thumbnail.status_code, 200)
+        refreshed_media = self.client.get("/media").json()
+        retried_media = next(item for item in refreshed_media if item["id"] == failed_media["id"])
+        self.assertIsNone(retried_media["thumbnail_failure_reason"])
 
 
 if __name__ == "__main__":
