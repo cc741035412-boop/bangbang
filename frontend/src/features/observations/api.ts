@@ -8,6 +8,23 @@ export type ObservationDetail = components["schemas"]["ObservationDetailResponse
 export type ObservationTag = components["schemas"]["ObservationTagResponse"];
 export interface Area { id: number; code: string; name: string }
 export interface Child { id: number; name: string; classroom_id: number }
+export interface IndicatorOption {
+  indicator_code: string;
+  indicator_name: string;
+  dimension: string;
+  level: number;
+  level_label: string;
+  description: string;
+  has_quant_rule: boolean;
+}
+export interface ObservationUpdate {
+  child_id?: number | null;
+  note?: string | null;
+  purpose?: string | null;
+  narrative?: string | null;
+  analysis?: string | null;
+  strategy?: string | null;
+}
 export interface Media {
   id: number;
   stored_filename: string;
@@ -23,6 +40,7 @@ const queryKeys = {
   observations: ["observations"] as const,
   areas: ["areas"] as const,
   children: ["children"] as const,
+  indicators: ["indicators"] as const,
   media: ["media"] as const,
   observation: (id: number) => ["observations", id] as const,
 };
@@ -90,6 +108,12 @@ async function getChildren() {
   return ensureArray<Child>(data, "幼儿信息");
 }
 
+async function getIndicators() {
+  const { data, error } = await apiClient.GET("/indicators");
+  if (error) throw new Error("指标字典加载失败");
+  return ensureArray<IndicatorOption>(data, "指标字典");
+}
+
 async function getMedia() {
   const { data, error } = await apiClient.GET("/media");
   if (error) throw new Error("素材信息加载失败");
@@ -114,6 +138,14 @@ export function useTodayMediaData() {
 
 export function useAreas() {
   return useQuery({ queryKey: queryKeys.areas, queryFn: getAreas });
+}
+
+export function useChildren() {
+  return useQuery({ queryKey: queryKeys.children, queryFn: getChildren });
+}
+
+export function useIndicators() {
+  return useQuery({ queryKey: queryKeys.indicators, queryFn: getIndicators });
 }
 
 export function useObservation(id: number) {
@@ -165,16 +197,36 @@ export function useGenerateNarrative(id: number) {
   });
 }
 
-export function useSaveNarrative(id: number) {
+export function useUpdateObservation(id: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (narrative: string) => {
+    mutationFn: async (body: ObservationUpdate) => {
       const { data, error } = await apiClient.PATCH("/observations/{obs_id}", {
         params: { path: { obs_id: id } },
-        body: { narrative },
+        body,
       });
-      if (error || !data) throw new Error("白描暂时没有保存成功");
+      if (error || !data) throw new Error("这次修改暂时没有保存成功");
       return data as Observation;
+    },
+    onMutate: async (body) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.observation(id) });
+      const previous = queryClient.getQueryData<ObservationDetail>(queryKeys.observation(id));
+      const previousList = queryClient.getQueryData<Observation[]>(queryKeys.observations);
+      queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+        current ? { ...current, ...body } : current
+      ));
+      queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
+        current?.map((item) => item.id === id ? { ...item, ...body } : item)
+      ));
+      return { previous, previousList };
+    },
+    onError: (_error, _body, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.observation(id), context.previous);
+      }
+      if (context?.previousList) {
+        queryClient.setQueryData(queryKeys.observations, context.previousList);
+      }
     },
     onSuccess: (saved) => {
       queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
@@ -242,6 +294,58 @@ export function useDecideTag(id: number) {
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
+    },
+  });
+}
+
+export function useAddTeacherTag(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ indicatorCode, level }: { indicatorCode: string; level: number }) => {
+      const { data, error } = await apiClient.POST("/observations/{obs_id}/tags", {
+        params: { path: { obs_id: id } },
+        body: { indicator_code: indicatorCode, level },
+      });
+      if (error || !data) throw new Error("补充指标暂时没有保存成功");
+      return data as ObservationTag;
+    },
+    onSuccess: (tag) => {
+      queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+        current ? { ...current, tags: [...current.tags, tag] } : current
+      ));
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
+    },
+  });
+}
+
+interface ConfirmationResult {
+  ok: boolean;
+  observation: Observation;
+  accepted_tag_count: number;
+}
+
+export function useConfirmObservation(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await apiClient.POST("/observations/{obs_id}/confirm", {
+        params: { path: { obs_id: id } },
+      });
+      if (error || !data) throw new Error("这条记录暂时没有确认成功");
+      return data as ConfirmationResult;
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+        current ? { ...current, ...result.observation } : current
+      ));
+      queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
+        current?.map((item) => (
+          item.id === id ? { ...item, ...result.observation } : item
+        ))
+      ));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.observations });
     },
   });
 }

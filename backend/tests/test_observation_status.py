@@ -163,6 +163,45 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(confirmed_observation["status"], "confirmed")
         self.assertIsNotNone(confirmed_observation["confirmed_at"])
 
+    def test_confirmation_requires_child_without_changing_age_snapshot(self):
+        created = self.client.post("/observations", json={"area_id": self.area_id}).json()
+        media = self.client.post(
+            "/uploads",
+            files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
+        ).json()
+        self.client.post(
+            f"/observations/{created['id']}/attach-media",
+            params={"media_id": media["id"]},
+        )
+        self.client.post(f"/observations/{created['id']}/narrative")
+        suggestions = self.client.post(
+            f"/observations/{created['id']}/suggest-tags"
+        ).json()
+        self.client.patch(
+            f"/observations/{created['id']}/tags/{suggestions['suggestions'][0]['tag_id']}",
+            json={"accepted": True},
+        )
+
+        missing_child = self.client.post(f"/observations/{created['id']}/confirm")
+        self.assertEqual(missing_child.status_code, 400)
+        self.assertEqual(
+            missing_child.json()["detail"],
+            "请先选择这条记录关于哪位幼儿",
+        )
+
+        original_classroom_id = created["classroom_id"]
+        original_age_group = created["age_group"]
+        patched = self.client.patch(
+            f"/observations/{created['id']}",
+            json={"child_id": self.child_id},
+        ).json()
+        self.assertEqual(patched["classroom_id"], original_classroom_id)
+        self.assertEqual(patched["age_group"], original_age_group)
+
+        confirmed = self.client.post(f"/observations/{created['id']}/confirm")
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertIsNotNone(confirmed.json()["observation"]["confirmed_at"])
+
     def test_ai_failure_and_retry(self):
         observation_id = self.create_bound_observation()
 

@@ -1,6 +1,7 @@
-import { Check, Minus, ShieldCheck, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Minus, Plus, ShieldCheck, Sparkles } from "lucide-react";
+import { useMemo, useState } from "react";
 
-import type { ObservationTag } from "../features/observations/api";
+import type { IndicatorOption, ObservationTag } from "../features/observations/api";
 
 const LEVEL_LABELS: Record<number, string> = {
   1: "初阶",
@@ -9,15 +10,45 @@ const LEVEL_LABELS: Record<number, string> = {
 };
 
 interface CandidateIndicatorsProps {
+  addingTeacherTag: boolean;
+  indicatorOptions: IndicatorOption[];
+  onAddTeacherTag: (indicatorCode: string, level: number) => Promise<void>;
   onDecide: (tagId: number, accepted: boolean) => void;
   tags: ObservationTag[];
 }
 
-export function CandidateIndicators({ onDecide, tags }: CandidateIndicatorsProps) {
+export function CandidateIndicators({
+  addingTeacherTag,
+  indicatorOptions,
+  onAddTeacherTag,
+  onDecide,
+  tags,
+}: CandidateIndicatorsProps) {
+  const [adding, setAdding] = useState(false);
+  const [indicatorCode, setIndicatorCode] = useState("");
+  const [level, setLevel] = useState(1);
   const systemTags = tags.filter((tag) => tag.source === "system_determined");
   const aiTags = tags
     .filter((tag) => tag.source === "ai_suggested")
     .sort((a, b) => (a.rank_in_suggestion ?? 99) - (b.rank_in_suggestion ?? 99));
+  const teacherTags = tags.filter((tag) => tag.source === "teacher_added");
+  const indicators = useMemo(() => {
+    const unique = new Map<string, IndicatorOption>();
+    indicatorOptions.forEach((item) => unique.set(item.indicator_code, item));
+    return [...unique.values()];
+  }, [indicatorOptions]);
+
+  async function addTeacherTag() {
+    if (!indicatorCode) return;
+    try {
+      await onAddTeacherTag(indicatorCode, level);
+      setIndicatorCode("");
+      setLevel(1);
+      setAdding(false);
+    } catch {
+      // 页面统一显示保存错误；保留当前选择，教师可直接重试。
+    }
+  }
 
   return (
     <div className="space-y-7">
@@ -122,7 +153,81 @@ export function CandidateIndicators({ onDecide, tags }: CandidateIndicatorsProps
             <p className="rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-4 text-sm text-indigo-700">AI 没有找到足够可靠的候选指标，没有为了凑数而硬猜。</p>
           )}
         </div>
+
+        <div className="mt-5 border-t border-stone-200 pt-5">
+          <button
+            aria-expanded={adding}
+            className="flex min-h-11 w-full items-center justify-between rounded-2xl border border-dashed border-brand/40 bg-brand-soft/50 px-4 text-left font-bold text-brand-deep"
+            onClick={() => setAdding((value) => !value)}
+            type="button"
+          >
+            <span className="flex items-center gap-2"><Plus size={18} /> 都没说到？我自己加一条</span>
+            <ChevronDown className={adding ? "rotate-180" : ""} size={18} />
+          </button>
+
+          {adding && (
+            <div className="mt-3 space-y-4 rounded-2xl border border-brand/20 bg-white p-4">
+              <label className="block text-sm font-bold" htmlFor="teacher-indicator">选择指标</label>
+              <select
+                className="min-h-12 w-full rounded-xl border border-stone-300 bg-white px-3 text-base"
+                id="teacher-indicator"
+                onChange={(event) => setIndicatorCode(event.target.value)}
+                value={indicatorCode}
+              >
+                <option value="">请选择一项</option>
+                {indicators.map((item) => (
+                  <option key={item.indicator_code} value={item.indicator_code}>
+                    {item.indicator_code} {item.indicator_name}
+                  </option>
+                ))}
+              </select>
+
+              <fieldset>
+                <legend className="text-sm font-bold">选择层级</legend>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {[1, 2, 3].map((value) => (
+                    <button
+                      aria-pressed={level === value}
+                      className={`min-h-11 rounded-xl border text-sm font-bold ${level === value ? "border-brand bg-brand text-white" : "border-stone-300 bg-white text-stone-600"}`}
+                      key={value}
+                      onClick={() => setLevel(value)}
+                      type="button"
+                    >
+                      {LEVEL_LABELS[value]}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <button
+                className="min-h-12 w-full rounded-xl bg-brand font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+                disabled={!indicatorCode || addingTeacherTag}
+                onClick={() => void addTeacherTag()}
+                type="button"
+              >
+                {addingTeacherTag ? "正在保存…" : "确认补充"}
+              </button>
+            </div>
+          )}
+        </div>
       </section>
+
+      {teacherTags.length > 0 && (
+        <section aria-labelledby="teacher-added-heading" className="rounded-3xl border border-emerald-200 bg-emerald-50 p-4">
+          <h2 className="text-lg font-bold text-emerald-950" id="teacher-added-heading">你补充的</h2>
+          <p className="mt-1 text-sm text-emerald-800">这些是 AI 没有想到、由你判断应保留的指标</p>
+          <div className="mt-4 space-y-2">
+            {teacherTags.map((tag) => (
+              <div className="flex items-center justify-between rounded-2xl bg-white px-4 py-3" key={tag.id}>
+                <span className="font-bold">{tag.indicator_code} {tag.indicator_name}</span>
+                <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-800">
+                  {LEVEL_LABELS[tag.level] ?? `第 ${tag.level} 阶`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

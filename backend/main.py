@@ -578,12 +578,14 @@ def update_observation(obs_id: int, payload: ObservationUpdate):
 
 @app.post("/observations/{obs_id}/confirm", tags=["2·观察记录"])
 def confirm_observation(obs_id: int):
-    """教师定稿。要求白描和至少一个已采纳的指标都到位。"""
+    """教师定稿。要求幼儿、白描和至少一个已采纳的指标都到位。"""
     with Session(engine) as s:
         obs = s.get(Observation, obs_id)
         if not obs:
             raise HTTPException(404, "观察记录不存在")
         ensure_status_transition(obs, "confirmed")
+        if obs.child_id is None:
+            raise HTTPException(400, "请先选择这条记录关于哪位幼儿")
         if not obs.narrative:
             raise HTTPException(400, "还没有白描，不能定稿")
 
