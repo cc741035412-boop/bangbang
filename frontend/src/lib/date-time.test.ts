@@ -1,7 +1,7 @@
 import {
   compareTimestampsDescending,
-  formatLocalTime,
-  isLocalToday,
+  formatKindergartenTime,
+  isKindergartenToday,
   parseApiTimestamp,
 } from "./date-time";
 
@@ -11,18 +11,17 @@ describe("date-time", () => {
       .toBe(Date.UTC(2026, 7, 23, 12, 34, 32, 426));
   });
 
-  it("formats through the device local timezone", () => {
-    const value = "2026-08-23T12:34:32Z";
-    const expected = new Intl.DateTimeFormat("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(new Date(value));
-    expect(formatLocalTime(value)).toBe(expected);
+  it("always formats in the kindergarten's Beijing timezone", () => {
+    expect(formatKindergartenTime("2026-08-23T14:18:00Z")).toBe("22:18");
   });
 
-  it("uses the same local-date rule for today's list", () => {
-    expect(isLocalToday(new Date().toISOString())).toBe(true);
+  it("uses the Beijing date boundary for today's list", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T16:00:00Z"));
+    expect(isKindergartenToday("2026-08-23T16:30:00Z")).toBe(true);
+    expect(isKindergartenToday("2026-08-23T15:30:00Z")).toBe(false);
+    vi.useRealTimers();
+
     expect(compareTimestampsDescending(
       "2026-08-23T12:00:00Z",
       "2026-08-23T13:00:00Z",

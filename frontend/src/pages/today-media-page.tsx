@@ -8,9 +8,9 @@ import { useTodayMediaData } from "../features/observations/api";
 import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
 import {
   compareTimestampsDescending,
-  formatLocalTime,
-  formatLocalToday,
-  isLocalToday,
+  formatKindergartenTime,
+  formatKindergartenToday,
+  isKindergartenToday,
 } from "../lib/date-time";
 
 interface SuccessState { captureDuration?: number }
@@ -40,7 +40,7 @@ export function TodayMediaPage() {
   );
   const todayRecords = useMemo(() => (
     (observations.data ?? [])
-      .filter((item) => isLocalToday(item.created_at))
+      .filter((item) => isKindergartenToday(item.created_at))
       .sort((a, b) => compareTimestampsDescending(a.created_at, b.created_at))
   ), [observations.data]);
   const readyCount = todayRecords.filter((item) => item.status === "ready_for_review").length;
@@ -55,7 +55,7 @@ export function TodayMediaPage() {
       <div className="px-5 pb-32 pt-7">
         <header className="mb-6 flex items-end justify-between gap-4">
           <div>
-            <p className="mb-1 text-sm font-medium text-ink-muted">{formatLocalToday()}</p>
+            <p className="mb-1 text-sm font-medium text-ink-muted">{formatKindergartenToday()}</p>
             <h1 className="text-[30px] font-bold tracking-[-0.03em]">今日素材</h1>
           </div>
           {readyCount > 0 && (
@@ -130,7 +130,7 @@ export function TodayMediaPage() {
                 <div className="min-w-0 flex-1 py-1">
                   <div className="flex items-start justify-between gap-2">
                     <p className="truncate font-bold">
-                      {areaNames.get(record.area_id) ?? "未知区域"} · {formatLocalTime(record.created_at ?? record.observed_at)}
+                      {areaNames.get(record.area_id) ?? "未知区域"} · {formatKindergartenTime(record.created_at ?? record.observed_at)}
                     </p>
                     <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${status.className}`}>
                       {record.status === "processing" && (

@@ -210,6 +210,8 @@ stateDiagram-v2
 
 阶段时间戳只记录事实，不在业务代码中存储差值：`processing_started_at` 记录开始处理时间，`ready_at` 记录进入待确认时间，`confirmed_at` 记录教师确认时间，失败原因写入 `failure_reason`；`created_at` 为记录创建时间。`ready_at - created_at` 用于计算“素材到可用记录耗时”，目标不超过 3 分钟；`confirmed_at - ready_at` 用于计算教师确认耗时。
 
+时间展示规则：后端继续以带时区标识的 UTC 保存时间戳；前端所有日期、时间及“今日”判断固定使用 `Asia/Shanghai`。观察记录表达的是深圳幼儿园当地发生时间，而不是查看者所在时区，因此不得改回跟随设备时区。
+
 ## 6. API 对应关系
 
 | 用户动作 | 当前接口 |

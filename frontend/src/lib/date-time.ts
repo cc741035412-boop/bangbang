@@ -1,34 +1,44 @@
-const LOCAL_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+// 观察记录表达的是幼儿园当地发生时间，不是查看设备所在地时间。
+// 产品固定服务深圳园所，因此所有展示和“今日”判断统一使用北京时间。
+export const KINDERGARTEN_TIME_ZONE = "Asia/Shanghai";
+
+const KINDERGARTEN_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit",
   minute: "2-digit",
-  hour12: false,
+  hourCycle: "h23",
+  timeZone: KINDERGARTEN_TIME_ZONE,
 });
 
-const LOCAL_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+const KINDERGARTEN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   month: "long",
   day: "numeric",
   weekday: "long",
+  timeZone: KINDERGARTEN_TIME_ZONE,
+});
+
+const KINDERGARTEN_DATE_KEY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: KINDERGARTEN_TIME_ZONE,
 });
 
 export function parseApiTimestamp(value: string) {
   return new Date(value);
 }
 
-export function formatLocalTime(value: string) {
-  return LOCAL_TIME_FORMATTER.format(parseApiTimestamp(value));
+export function formatKindergartenTime(value: string) {
+  return KINDERGARTEN_TIME_FORMATTER.format(parseApiTimestamp(value));
 }
 
-export function formatLocalToday() {
-  return LOCAL_DATE_FORMATTER.format(new Date());
+export function formatKindergartenToday() {
+  return KINDERGARTEN_DATE_FORMATTER.format(new Date());
 }
 
-export function isLocalToday(value?: string | null) {
+export function isKindergartenToday(value?: string | null) {
   if (!value) return false;
-  const date = parseApiTimestamp(value);
-  const today = new Date();
-  return date.getFullYear() === today.getFullYear()
-    && date.getMonth() === today.getMonth()
-    && date.getDate() === today.getDate();
+  return KINDERGARTEN_DATE_KEY_FORMATTER.format(parseApiTimestamp(value))
+    === KINDERGARTEN_DATE_KEY_FORMATTER.format(new Date());
 }
 
 export function compareTimestampsDescending(a?: string | null, b?: string | null) {

@@ -9,7 +9,7 @@ import {
   useObservation,
   useSaveNarrative,
 } from "../features/observations/api";
-import { formatLocalTime } from "../lib/date-time";
+import { formatKindergartenTime } from "../lib/date-time";
 
 function humanizeFailure(reason?: string | null) {
   if (!reason) return "这次没有整理成功，请重新试一次";
@@ -106,7 +106,7 @@ export function ObservationReviewPage() {
           <div className="px-4 py-4">
             <p className="font-bold">{record.area_name ?? "未知区域"}</p>
             <p className="mt-1 text-sm text-ink-muted">
-              {formatLocalTime(record.created_at ?? record.observed_at)}
+              {formatKindergartenTime(record.created_at ?? record.observed_at)}
             </p>
           </div>
         </section>
