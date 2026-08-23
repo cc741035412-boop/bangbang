@@ -228,6 +228,11 @@ stateDiagram-v2
 | 保存为正式记录 | `POST /observations/{obs_id}/confirm` |
 | 查看记录详情 | `GET /observations/{obs_id}` |
 
+### 6.1 素材格式兼容待办
+
+- HEIC/HEVC 素材在接入 AI 前需确认模型是否支持，不支持则需增加转码环节。
+- 首页依赖浏览器原生能力预览 HEIC/HEIF；浏览器不支持时回退为图片占位图标，不影响素材上传和保存。
+
 ## 7. 核心埋点
 
 | 事件 | 关键字段 | 用途 |

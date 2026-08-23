@@ -10,9 +10,41 @@ import {
   useSubmitCapture,
 } from "../features/observations/api";
 
-const SUPPORTED_FILE_TYPES = new Set(["image/jpeg", "image/png", "video/mp4"]);
+const SUPPORTED_FILE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/heic",
+  "image/heif",
+  "video/mp4",
+  "video/quicktime",
+]);
+const SUPPORTED_FILE_EXTENSIONS = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".heic",
+  ".heif",
+  ".mp4",
+  ".mov",
+]);
 const FILE_TOO_LARGE_MESSAGE = "文件太大了，最多 200MB。可以拍短一点的视频";
-const FILE_TYPE_MESSAGE = "只支持 JPG、PNG 和 MP4";
+const FILE_TYPE_MESSAGE = "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）";
+
+function isSupportedFile(file: File) {
+  const normalizedType = file.type.split(";", 1)[0].trim().toLowerCase();
+  if (SUPPORTED_FILE_TYPES.has(normalizedType)) return true;
+  if (normalizedType !== "" && normalizedType !== "application/octet-stream") return false;
+  const lastDot = file.name.lastIndexOf(".");
+  const suffix = lastDot >= 0 ? file.name.slice(lastDot).toLowerCase() : "";
+  return SUPPORTED_FILE_EXTENSIONS.has(suffix);
+}
+
+function isImageFile(file: File) {
+  const lowerName = file.name.toLowerCase();
+  return file.type.startsWith("image/")
+    || lowerName.endsWith(".heic")
+    || lowerName.endsWith(".heif");
+}
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -26,6 +58,7 @@ export function CapturePage() {
   const progress = useRef<{ mediaId?: number; observationId?: number }>({});
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewFailed, setPreviewFailed] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [uploadPercentage, setUploadPercentage] = useState<number | null>(null);
   const [areaId, setAreaId] = useState<number | null>(null);
@@ -42,15 +75,16 @@ export function CapturePage() {
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0] ?? null;
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    previewUrlRef.current = selected?.type.startsWith("image/")
+    previewUrlRef.current = selected && isImageFile(selected)
       ? URL.createObjectURL(selected)
       : null;
     setPreviewUrl(previewUrlRef.current);
+    setPreviewFailed(false);
     setFile(selected);
     setFileError(
       selected == null
         ? null
-        : !SUPPORTED_FILE_TYPES.has(selected.type)
+        : !isSupportedFile(selected)
           ? FILE_TYPE_MESSAGE
           : selected.size > MAX_UPLOAD_SIZE_BYTES
             ? FILE_TOO_LARGE_MESSAGE
@@ -109,14 +143,21 @@ export function CapturePage() {
         <section aria-labelledby="file-heading">
           <h2 className="mb-3 text-base font-bold" id="file-heading">1. 选择照片或视频</h2>
           <label className="flex min-h-40 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-3xl border-2 border-dashed border-stone-300 bg-surface text-center">
-            {previewUrl ? (
+            {previewUrl && !previewFailed ? (
               <div className="w-full">
-                <img alt="已选择图片预览" className="h-52 w-full object-cover" src={previewUrl} />
+                <img
+                  alt="已选择图片预览"
+                  className="h-52 w-full object-cover"
+                  onError={() => setPreviewFailed(true)}
+                  src={previewUrl}
+                />
                 <p className="px-4 py-3 text-sm text-ink-muted">{file?.name} · {formatFileSize(file?.size ?? 0)}</p>
               </div>
             ) : file ? (
               <div className="px-6 py-7">
-                <FileVideo aria-hidden className="mx-auto text-brand" size={38} strokeWidth={1.7} />
+                {isImageFile(file)
+                  ? <ImagePlus aria-hidden className="mx-auto text-brand" size={38} strokeWidth={1.7} />
+                  : <FileVideo aria-hidden className="mx-auto text-brand" size={38} strokeWidth={1.7} />}
                 <p className="mt-3 max-w-[260px] truncate font-bold">{file.name}</p>
                 <p className="mt-1 text-sm text-ink-muted">{formatFileSize(file.size)}</p>
               </div>
@@ -124,10 +165,15 @@ export function CapturePage() {
               <div className="px-6 py-7">
                 <ImagePlus aria-hidden className="mx-auto text-brand" size={38} strokeWidth={1.7} />
                 <p className="mt-3 font-bold">点这里选择文件</p>
-                <p className="mt-1 text-sm text-ink-muted">JPG、PNG 或 MP4，最多 200MB</p>
+                <p className="mt-1 text-sm text-ink-muted">JPG、PNG、HEIC、MP4 或 MOV，最多 200MB</p>
               </div>
             )}
-            <input accept="image/jpeg,image/png,video/mp4" className="sr-only" onChange={selectFile} type="file" />
+            <input
+              accept="image/jpeg,image/png,image/heic,image/heif,video/mp4,video/quicktime,.jpg,.jpeg,.png,.heic,.heif,.mp4,.mov"
+              className="sr-only"
+              onChange={selectFile}
+              type="file"
+            />
           </label>
           {fileError && <p className="mt-3 rounded-2xl bg-red-50 px-4 py-3 text-sm font-bold text-red-700">{fileError}</p>}
         </section>

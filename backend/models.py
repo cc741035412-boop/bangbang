@@ -62,7 +62,7 @@ class Observation(SQLModel, table=True):
 class Media(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     stored_filename: str                  # uploads/ 里的真实文件名
-    content_type: str                     # image/jpeg、video/mp4
+    content_type: str                     # 规范化 MIME，如 image/heic、video/quicktime
     size: int                             # 字节数
     duration_sec: Optional[int] = None    # 视频时长，指标 1.1 的层级分界靠它算，纯计算零幻觉
     observation_id: Optional[int] = Field(default=None, foreign_key="observation.id")

@@ -38,8 +38,21 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
     "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
 }
+EXTENSION_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+}
+FALLBACK_CONTENT_TYPES = {"", "application/octet-stream"}
 MAX_SIZE = 200 * 1024 * 1024  # 200MB
 
 
@@ -198,6 +211,19 @@ def transition_observation(
         obs.failure_reason = failure_reason or "AI 处理失败"
 
 
+def resolve_upload_type(file: UploadFile):
+    """优先信任明确 MIME；仅在 MIME 缺失或通用二进制时按扩展名回退。"""
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type in ALLOWED_TYPES:
+        return content_type, ALLOWED_TYPES[content_type]
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if content_type in FALLBACK_CONTENT_TYPES and suffix in EXTENSION_TYPES:
+        return EXTENSION_TYPES[suffix], suffix
+
+    raise HTTPException(400, "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）")
+
+
 # ============================================================
 # 基础
 # ============================================================
@@ -239,10 +265,7 @@ async def upload_media(
     ),
 ):
     """上传一份模拟照片或视频，同时在 media 表登记一条"""
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(400, "只支持 JPG、PNG 和 MP4 文件")
-
-    ext = ALLOWED_TYPES[file.content_type]
+    content_type, ext = resolve_upload_type(file)
     stored_filename = f"{uuid4().hex}{ext}"
     stored_path = UPLOAD_DIR / stored_filename
     size = 0
@@ -261,7 +284,7 @@ async def upload_media(
     with Session(engine) as s:
         media = Media(
             stored_filename=stored_filename,
-            content_type=file.content_type,
+            content_type=content_type,
             size=size,
             duration_sec=duration_sec,
         )
@@ -287,7 +310,10 @@ def list_media():
             "content": {
                 "image/jpeg": {},
                 "image/png": {},
+                "image/heic": {},
+                "image/heif": {},
                 "video/mp4": {},
+                "video/quicktime": {},
             },
         },
     },

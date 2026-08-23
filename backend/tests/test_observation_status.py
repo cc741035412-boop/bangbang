@@ -231,6 +231,49 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(too_large.status_code, 413)
         self.assertEqual(too_large.json()["detail"], "文件不能超过 200MB")
 
+    def test_iphone_media_types_and_extension_fallback(self):
+        cases = [
+            ("iphone.mov", "video/quicktime", "video/quicktime", "video"),
+            ("iphone.heic", "image/heic", "image/heic", "image"),
+            ("iphone.heif", "image/heif", "image/heif", "image"),
+            ("fallback.mov", "application/octet-stream", "video/quicktime", "video"),
+            ("fallback.heic", "", "image/heic", "image"),
+            ("fallback.heif", "application/octet-stream", "image/heif", "image"),
+            ("fallback.jpg", "application/octet-stream", "image/jpeg", "image"),
+            ("fallback.jpeg", "application/octet-stream", "image/jpeg", "image"),
+            ("fallback.png", "application/octet-stream", "image/png", "image"),
+            ("fallback.mp4", "application/octet-stream", "video/mp4", "video"),
+        ]
+
+        for filename, sent_type, expected_type, expected_media_type in cases:
+            with self.subTest(filename=filename, sent_type=sent_type):
+                uploaded = self.client.post(
+                    "/uploads",
+                    files={"file": (filename, b"mock-iphone-media", sent_type)},
+                )
+                self.assertEqual(uploaded.status_code, 201)
+                self.assertEqual(uploaded.json()["content_type"], expected_type)
+
+                observation = self.client.post(
+                    "/observations", json={"area_id": self.area_id}
+                ).json()
+                attached = self.client.post(
+                    f"/observations/{observation['id']}/attach-media",
+                    params={"media_id": uploaded.json()["id"]},
+                )
+                self.assertEqual(attached.status_code, 200)
+                self.assertEqual(attached.json()["media_type"], expected_media_type)
+
+        rejected = self.client.post(
+            "/uploads",
+            files={"file": ("notes.txt", b"not-media", "text/plain")},
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(
+            rejected.json()["detail"],
+            "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

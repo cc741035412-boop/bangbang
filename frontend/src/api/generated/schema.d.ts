@@ -751,7 +751,10 @@ export interface operations {
                 content: {
                     "image/jpeg": unknown;
                     "image/png": unknown;
+                    "image/heic": unknown;
+                    "image/heif": unknown;
                     "video/mp4": unknown;
+                    "video/quicktime": unknown;
                 };
             };
             /** @description Validation Error */

@@ -88,7 +88,7 @@ function getId(data: unknown, step: string): number {
 
 function uploadErrorMessage(status?: number) {
   if (status === 413) return "文件太大了，最多 200MB。可以拍短一点的视频";
-  if (status === 400) return "只支持 JPG、PNG 和 MP4";
+  if (status === 400) return "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）";
   return "上传失败，点这里重试";
 }
 
