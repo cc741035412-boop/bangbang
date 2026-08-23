@@ -3,10 +3,44 @@ import { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 
 import { MobilePage } from "../components/mobile-page";
-import { useTodayMediaData } from "../features/observations/api";
+import { getMediaFileUrl, type Media, useTodayMediaData } from "../features/observations/api";
 import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
 
 interface SuccessState { captureDuration?: number }
+
+function MediaThumbnail({ media, isVideo }: { media?: Media; isVideo: boolean }) {
+  const [hasError, setHasError] = useState(false);
+
+  if (!media || hasError) {
+    return isVideo
+      ? <Video aria-label="视频素材" size={28} strokeWidth={1.8} />
+      : <ImageIcon aria-label="图片素材" size={28} strokeWidth={1.8} />;
+  }
+
+  const fileUrl = getMediaFileUrl(media.id);
+  if (isVideo) {
+    return (
+      <video
+        aria-label="视频素材首帧"
+        className="size-full object-cover"
+        muted
+        onError={() => setHasError(true)}
+        playsInline
+        preload="metadata"
+        src={fileUrl}
+      />
+    );
+  }
+
+  return (
+    <img
+      alt="素材缩略图"
+      className="size-full object-cover"
+      onError={() => setHasError(true)}
+      src={fileUrl}
+    />
+  );
+}
 
 function isToday(value?: string | null) {
   if (!value) return false;
@@ -132,10 +166,8 @@ export function TodayMediaPage() {
             const isVideo = itemMedia?.content_type.startsWith("video/") || record.media_type === "video";
             return (
               <article className="flex gap-4 rounded-3xl bg-surface p-3 shadow-sm" key={record.id}>
-                <div className="grid size-[84px] shrink-0 place-items-center rounded-2xl bg-thumbnail text-brand-deep">
-                  {isVideo
-                    ? <Video aria-label="视频素材" size={28} strokeWidth={1.8} />
-                    : <ImageIcon aria-label="图片素材" size={28} strokeWidth={1.8} />}
+                <div className="grid size-[84px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-thumbnail text-brand-deep">
+                  <MediaThumbnail isVideo={isVideo} media={itemMedia} />
                 </div>
                 <div className="min-w-0 flex-1 py-1">
                   <div className="flex items-start justify-between gap-2">

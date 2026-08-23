@@ -14,6 +14,8 @@ export interface Media {
   observation_id?: number | null;
 }
 
+export const MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024;
+
 const queryKeys = {
   observations: ["observations"] as const,
   areas: ["areas"] as const,
@@ -63,7 +65,12 @@ export function useAreas() {
 }
 
 interface CaptureProgress { mediaId?: number; observationId?: number }
-interface CaptureInput { file: File; areaId: number; progress: CaptureProgress }
+interface CaptureInput {
+  file: File;
+  areaId: number;
+  progress: CaptureProgress;
+  onUploadProgress: (percentage: number) => void;
+}
 
 export class CaptureError extends Error {
   constructor(message: string) {
@@ -80,28 +87,47 @@ function getId(data: unknown, step: string): number {
 }
 
 function uploadErrorMessage(status?: number) {
-  if (status === 413) return "文件太大了，最多 20MB。可以拍短一点的视频";
+  if (status === 413) return "文件太大了，最多 200MB。可以拍短一点的视频";
   if (status === 400) return "只支持 JPG、PNG 和 MP4";
   return "上传失败，点这里重试";
 }
 
-async function submitCapture({ file, areaId, progress }: CaptureInput) {
-  if (!progress.mediaId) {
+function uploadFile(file: File, onProgress: (percentage: number) => void) {
+  return new Promise<number>((resolve, reject) => {
+    const request = new XMLHttpRequest();
     const formData = new FormData();
     formData.append("file", file);
-    let uploadResult;
-    try {
-      uploadResult = await apiClient.POST("/uploads", {
-        body: { file: file.name },
-        bodySerializer: () => formData,
-      });
-    } catch {
-      throw new CaptureError(uploadErrorMessage());
-    }
-    if (uploadResult.error || !uploadResult.data) {
-      throw new CaptureError(uploadErrorMessage(uploadResult.response.status));
-    }
-    progress.mediaId = getId(uploadResult.data, "素材上传");
+
+    request.open("POST", "/api/uploads");
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    });
+    request.addEventListener("load", () => {
+      if (request.status < 200 || request.status >= 300) {
+        reject(new CaptureError(uploadErrorMessage(request.status)));
+        return;
+      }
+      try {
+        onProgress(100);
+        resolve(getId(JSON.parse(request.responseText), "素材上传"));
+      } catch {
+        reject(new CaptureError("素材上传没有完成，请点按钮重试"));
+      }
+    });
+    request.addEventListener("error", () => reject(new CaptureError(uploadErrorMessage())));
+    request.addEventListener("abort", () => reject(new CaptureError(uploadErrorMessage())));
+    request.send(formData);
+  });
+}
+
+async function submitCapture({ file, areaId, progress, onUploadProgress }: CaptureInput) {
+  if (!progress.mediaId) {
+    onUploadProgress(0);
+    progress.mediaId = await uploadFile(file, onUploadProgress);
+  } else {
+    onUploadProgress(100);
   }
 
   if (!progress.observationId) {
@@ -131,6 +157,10 @@ async function submitCapture({ file, areaId, progress }: CaptureInput) {
   }
 
   return { observationId: progress.observationId };
+}
+
+export function getMediaFileUrl(mediaId: number) {
+  return `/api/media/${mediaId}/file`;
 }
 
 export function useSubmitCapture() {

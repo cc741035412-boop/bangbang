@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Optional, List, Literal
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
@@ -23,7 +24,7 @@ from models import (
     Observation, Media, ObservationTag,
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
-from config import DEFAULT_CLASSROOM_ID
+from config import DEFAULT_CLASSROOM_ID, UPLOAD_DIR
 import ai_service
 
 app = FastAPI(
@@ -32,15 +33,14 @@ app = FastAPI(
     description="幼儿园教师素材沉淀与观察记录生成。AI 部分当前为演示 mock。",
 )
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "video/mp4": ".mp4",
 }
-MAX_SIZE = 20 * 1024 * 1024  # 20MB
+MAX_SIZE = 200 * 1024 * 1024  # 200MB
 
 
 # ============================================================
@@ -242,19 +242,27 @@ async def upload_media(
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(400, "只支持 JPG、PNG 和 MP4 文件")
 
-    content = await file.read()
-    if len(content) > MAX_SIZE:
-        raise HTTPException(413, "文件不能超过 20MB")
-
     ext = ALLOWED_TYPES[file.content_type]
     stored_filename = f"{uuid4().hex}{ext}"
-    (UPLOAD_DIR / stored_filename).write_bytes(content)
+    stored_path = UPLOAD_DIR / stored_filename
+    size = 0
+
+    try:
+        with stored_path.open("wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_SIZE:
+                    raise HTTPException(413, "文件不能超过 200MB")
+                destination.write(chunk)
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
 
     with Session(engine) as s:
         media = Media(
             stored_filename=stored_filename,
             content_type=file.content_type,
-            size=len(content),
+            size=size,
             duration_sec=duration_sec,
         )
         s.add(media)
@@ -268,6 +276,37 @@ def list_media():
     """所有已上传的素材"""
     with Session(engine) as s:
         return s.exec(select(Media)).all()
+
+
+@app.get(
+    "/media/{media_id}/file",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "description": "素材文件",
+            "content": {
+                "image/jpeg": {},
+                "image/png": {},
+                "video/mp4": {},
+            },
+        },
+    },
+    tags=["1·素材"],
+)
+def get_media_file(media_id: int):
+    """读取一份已上传素材，供前端展示图片或视频首帧。"""
+    with Session(engine) as s:
+        media = s.get(Media, media_id)
+        if not media:
+            raise HTTPException(404, "素材不存在")
+
+        if Path(media.stored_filename).name != media.stored_filename:
+            raise HTTPException(404, "素材文件不存在")
+        stored_path = UPLOAD_DIR / media.stored_filename
+        if not stored_path.is_file():
+            raise HTTPException(404, "素材文件不存在")
+
+        return FileResponse(stored_path, media_type=media.content_type)
 
 
 # ============================================================

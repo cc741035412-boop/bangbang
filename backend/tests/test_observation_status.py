@@ -207,6 +207,30 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(updated.json()["classroom_id"], original_classroom_id)
         self.assertEqual(updated.json()["age_group"], original_age_group)
 
+    def test_upload_limit_and_read_media_file(self):
+        image_content = b"mock-image-content"
+        uploaded = self.client.post(
+            "/uploads",
+            files={"file": ("mock.jpg", image_content, "image/jpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 201)
+
+        media_file = self.client.get(f"/media/{uploaded.json()['id']}/file")
+        self.assertEqual(media_file.status_code, 200)
+        self.assertEqual(media_file.headers["content-type"], "image/jpeg")
+        self.assertEqual(media_file.content, image_content)
+
+        missing = self.client.get("/media/999999/file")
+        self.assertEqual(missing.status_code, 404)
+
+        with patch.object(main, "MAX_SIZE", 8):
+            too_large = self.client.post(
+                "/uploads",
+                files={"file": ("large.mp4", b"123456789", "video/mp4")},
+            )
+        self.assertEqual(too_large.status_code, 413)
+        self.assertEqual(too_large.json()["detail"], "文件不能超过 200MB")
+
 
 if __name__ == "__main__":
     unittest.main()
