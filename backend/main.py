@@ -23,6 +23,7 @@ from models import (
     Observation, Media, ObservationTag,
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
+from config import DEFAULT_CLASSROOM_ID
 import ai_service
 
 app = FastAPI(
@@ -59,7 +60,11 @@ class TagCreate(BaseModel):
 
 
 class ObservationUpdate(BaseModel):
-    """教师修改观察记录的文字部分"""
+    """教师补观察对象、现场说明，或修改观察记录的四段正文。"""
+    model_config = ConfigDict(extra="forbid")
+
+    child_id: Optional[int] = None
+    note: Optional[str] = None
     purpose: Optional[str] = None
     narrative: Optional[str] = None
     analysis: Optional[str] = None
@@ -67,15 +72,12 @@ class ObservationUpdate(BaseModel):
 
 
 class ObservationCreate(BaseModel):
-    """新建观察记录。状态与阶段时间戳只由后端维护。"""
+    """现场新建观察记录；班级、年龄段、素材类型和状态由后端维护。"""
     model_config = ConfigDict(extra="forbid")
 
-    child_id: int
     area_id: int
-    age_group: str
-    media_type: str
-    observed_at: Optional[datetime] = None
-    purpose: Optional[str] = None
+    child_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 ObservationStatus = Literal[
@@ -92,13 +94,14 @@ class ObservationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    child_id: int
+    child_id: Optional[int] = None
     area_id: int
     classroom_id: Optional[int] = None
     observed_at: datetime
     age_group: str
-    media_type: str
+    media_type: Optional[str] = None
     purpose: Optional[str] = None
+    note: Optional[str] = None
     narrative: Optional[str] = None
     analysis: Optional[str] = None
     strategy: Optional[str] = None
@@ -273,20 +276,20 @@ def list_media():
 
 @app.post("/observations", status_code=201, tags=["2·观察记录"])
 def create_observation(payload: ObservationCreate):
-    """新建观察记录；状态固定由后端初始化为 uploaded。"""
+    """现场新建观察记录；只要求游戏区，状态固定为 uploaded。"""
     with Session(engine) as s:
-        # 自动补班级：从幼儿身上带出来，教师不用填
-        child = s.get(Child, payload.child_id)
-        if not child:
+        room = s.get(ClassRoom, DEFAULT_CLASSROOM_ID)
+        if not room:
+            raise HTTPException(500, "默认班级配置无效，请检查 DEFAULT_CLASSROOM_ID")
+        if payload.child_id is not None and not s.get(Child, payload.child_id):
             raise HTTPException(404, f"找不到 id={payload.child_id} 的幼儿")
         observation = Observation(
             child_id=payload.child_id,
             area_id=payload.area_id,
-            classroom_id=child.classroom_id,
-            observed_at=payload.observed_at or datetime.now(),
-            age_group=payload.age_group,
-            media_type=payload.media_type,
-            purpose=payload.purpose,
+            classroom_id=room.id,
+            age_group=room.age_group,
+            media_type=None,
+            note=payload.note,
             status="uploaded",
         )
         s.add(observation)
@@ -332,7 +335,11 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
             )
 
         media.observation_id = obs_id
-        obs.media_type = "video" if media.content_type == "video/mp4" else "photo"
+        if obs.media_type is None:
+            if media.content_type.startswith("image/"):
+                obs.media_type = "image"
+            elif media.content_type.startswith("video/"):
+                obs.media_type = "video"
         s.add(media)
         s.add(obs)
         s.commit()
@@ -342,13 +349,26 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
 
 @app.patch("/observations/{obs_id}", tags=["2·观察记录"])
 def update_observation(obs_id: int, payload: ObservationUpdate):
-    """教师修改观察目的 / 白描 / 分析 / 措施"""
+    """教师补幼儿和现场说明，或修改观察目的 / 白描 / 分析 / 措施。"""
     with Session(engine) as s:
         obs = s.get(Observation, obs_id)
         if not obs:
             raise HTTPException(404, "观察记录不存在")
 
         data = payload.model_dump(exclude_unset=True)
+
+        context_fields = {"child_id", "note"} & data.keys()
+        if context_fields and obs.status not in {"uploaded", "ready_for_review"}:
+            raise HTTPException(
+                400,
+                detail={
+                    "message": f"状态为 {obs.status} 时不能更新 child_id 或 note",
+                    "current_status": obs.status,
+                },
+            )
+        if "child_id" in data and data["child_id"] is not None:
+            if not s.get(Child, data["child_id"]):
+                raise HTTPException(404, f"找不到 id={data['child_id']} 的幼儿")
 
         # 教师动过 AI 白描 → 来源自动从 ai 变成 ai_edited
         if "narrative" in data and obs.narrative_source == "ai":
@@ -633,7 +653,7 @@ def get_observation_detail(obs_id: int):
         if not obs:
             raise HTTPException(404, "观察记录不存在")
 
-        child = s.get(Child, obs.child_id)
+        child = s.get(Child, obs.child_id) if obs.child_id is not None else None
         area = s.get(Area, obs.area_id)
         room = s.get(ClassRoom, obs.classroom_id) if obs.classroom_id else None
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).all()

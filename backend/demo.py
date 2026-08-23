@@ -10,8 +10,9 @@
 
 import sys
 import httpx
+from config import API_BASE_URL
 
-BASE = "http://127.0.0.1:8000"
+BASE = API_BASE_URL
 LINE = "─" * 62
 
 
@@ -67,18 +68,22 @@ def main():
     # ---------- 3 建观察记录 ----------
     step(3, "新建一条观察记录草稿")
     r = c.post("/observations", json={
-        "child_id": child["id"],
         "area_id": area["id"],
-        "age_group": "middle",
-        "media_type": "video",
-        "purpose": "观察幼儿的搭建能力，了解其专注度与解决问题的能力",
+        "note": "户外自主游戏现场拍摄",
     })
     if r.status_code != 201:
         die("创建观察记录失败", r)
     obs = r.json()
     obs_id = obs["id"]
     print(f"  观察记录 id={obs_id}，状态={obs['status']}")
-    print(f"  班级已自动从幼儿身上带出：classroom_id={obs['classroom_id']}")
+    print(f"  默认班级：classroom_id={obs['classroom_id']}，年龄段快照={obs['age_group']}")
+
+    r = c.patch(f"/observations/{obs_id}", json={
+        "child_id": child["id"],
+        "purpose": "观察幼儿的搭建能力，了解其专注度与解决问题的能力",
+    })
+    if r.status_code != 200:
+        die("补充观察对象失败", r)
 
     # ---------- 4 绑定素材 ----------
     step(4, "把素材绑定到这条记录上")
@@ -157,15 +162,19 @@ def main():
     # ---------- 成果 1：完整记录 ----------
     print(f"\n{LINE}\n【成果 1】一份完整的观察记录\n{LINE}")
     detail = c.get(f"/observations/{obs_id}").json()
-    for k in ["状态", "观察对象", "班级", "年龄段", "观察地点", "观察目的"]:
-        print(f"  {k}：{detail[k]}")
-    print(f"\n  观察描述（{detail['白描来源']}）：\n    {detail['观察描述']}")
-    print(f"\n  观察分析：\n    {detail['观察分析']}")
-    print(f"\n  措施：\n    {detail['措施']}")
+    for label, key in [
+        ("状态", "status"), ("观察对象", "child_name"),
+        ("班级", "classroom_name"), ("年龄段", "age_group"),
+        ("观察地点", "area_name"), ("观察目的", "purpose"),
+    ]:
+        print(f"  {label}：{detail[key]}")
+    print(f"\n  观察描述（{detail['narrative_source']}）：\n    {detail['narrative']}")
+    print(f"\n  观察分析：\n    {detail['analysis']}")
+    print(f"\n  措施：\n    {detail['strategy']}")
     print(f"\n  已采纳指标：")
-    for t in detail["已采纳指标"]:
-        print(f"    · {t['编号']} {t['名称']} · {t['层级']}　（{t['来源']}）")
-        print(f"      {t['行为描述']}")
+    for t in detail["tags"]:
+        if t["accepted"] is True:
+            print(f"    · {t['indicator_code']} {t['indicator_name']} · level {t['level']}（{t['source']}）")
 
     # ---------- 成果 2：采纳率 ----------
     print(f"\n{LINE}\n【成果 2】AI 效果指标 —— 这是作品集里最值钱的数字\n{LINE}")

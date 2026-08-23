@@ -13,7 +13,7 @@ MVP 完成点：教师明确确认一条包含素材、客观白描、观察指�
 
 ```mermaid
 flowchart LR
-    A[选择照片或视频] --> B[选择幼儿与游戏区域]
+    A[选择照片或视频] --> B[选择游戏区域]
     B --> C[可选：补一句现场信息]
     C --> D[保存为待整理素材]
     D --> E[系统生成客观白描与候选指标]
@@ -55,13 +55,18 @@ flowchart LR
 
 必填：
 
-- 幼儿：MVP 默认单选；多人活动需求先记录，不在首版扩展数据结构。
 - 游戏区域。
 
 选填：
 
-- 观察目的。
 - 一句现场补充，例如幼儿原话、活动背景或持续时间。
+
+系统自动带入：
+
+- 当前教师的班级。
+- 班级对应的年龄段快照。
+
+幼儿现场不选，在稍后确认环节回看素材后补充。
 
 交互要求：
 
@@ -86,6 +91,7 @@ flowchart LR
 
 - 从“今日素材”的待确认入口进入。
 - 首屏展示素材缩略图、幼儿、区域、拍摄时间和处理状态。
+- 教师根据素材补充幼儿；已保存的班级和年龄段快照不随之改变。
 - AI 尚未完成时展示预计等待状态，允许先离开。
 
 #### 步骤 B2：核对客观白描
@@ -156,9 +162,8 @@ flowchart LR
 主要内容：
 
 - 素材预览
-- 幼儿选择
 - 游戏区域选择
-- 观察目的和现场补充
+- 一句话现场补充
 
 主要动作：先存下来。
 
@@ -212,14 +217,14 @@ stateDiagram-v2
 | 查询幼儿和区域 | `GET /children`、`GET /areas` |
 | 上传素材 | `POST /uploads` |
 | 查看素材 | `GET /media` |
-| 创建观察记录草稿 | `POST /observations` |
+| 创建观察记录（仅 `area_id` 必填，可带 `child_id`、`note`） | `POST /observations` |
 | 关联素材 | `POST /observations/{obs_id}/attach-media` |
 | 生成客观白描 | `POST /observations/{obs_id}/narrative` |
 | 推荐候选指标 | `POST /observations/{obs_id}/suggest-tags` |
 | 查看候选指标 | `GET /observations/{obs_id}/tags` |
 | 采纳或否决指标 | `PATCH /observations/{obs_id}/tags/{tag_id}` |
 | 教师补充指标 | `POST /observations/{obs_id}/tags` |
-| 编辑白描、分析与措施 | `PATCH /observations/{obs_id}` |
+| 补幼儿或现场说明，编辑四段正文 | `PATCH /observations/{obs_id}` |
 | 保存为正式记录 | `POST /observations/{obs_id}/confirm` |
 | 查看记录详情 | `GET /observations/{obs_id}` |
 
@@ -229,7 +234,7 @@ stateDiagram-v2
 |---|---|---|
 | `capture_started` | 时间、入口 | 计算现场流程开始 |
 | `media_upload_completed` | 数量、类型、耗时 | 判断上传体验 |
-| `quick_capture_saved` | 幼儿、区域、总耗时 | 计算 20 秒目标 |
+| `quick_capture_saved` | 区域、总耗时 | 计算 20 秒目标 |
 | `ai_processing_completed` | 引擎、是否 mock、耗时 | 监控处理过程 |
 | `narrative_edited` | 原文字数、改后字数、差异量 | 评估白描可用性 |
 | `tag_decided` | 指标、采纳结果、置信度、否决原因 | 评估候选质量 |
@@ -248,7 +253,7 @@ stateDiagram-v2
 测试人员只在教师明确无法继续时提供帮助，并记录：
 
 - 是否能找到添加素材入口。
-- 是否理解为什么要选择幼儿和区域。
+- 是否理解为什么现场只选择区域、幼儿稍后补充。
 - 现场阶段是否出现不必要的长输入。
 - 是否能区分系统判定和 AI 建议。
 - 是否理解“采纳、否决、教师补充”。

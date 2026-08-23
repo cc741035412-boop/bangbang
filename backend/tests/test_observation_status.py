@@ -54,11 +54,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         rejected_status = self.client.post(
             "/observations",
             json={
-                "child_id": self.child_id,
                 "area_id": self.area_id,
-                "age_group": "middle",
-                "media_type": "video",
-                "purpose": "测试状态流转",
                 "status": "confirmed",
             },
         )
@@ -69,9 +65,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
             json={
                 "child_id": self.child_id,
                 "area_id": self.area_id,
-                "age_group": "middle",
-                "media_type": "video",
-                "purpose": "测试状态流转",
+                "note": "测试状态流转",
             },
         )
         self.assertEqual(create_response.status_code, 201)
@@ -103,6 +97,13 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(suggestions.json()["status"], "ready_for_review")
         self.assertIsNotNone(suggestions.json()["ready_at"])
         self.assertTrue(suggestions.json()["suggestions"])
+
+        update_context = self.client.patch(
+            f"/observations/{observation_id}",
+            json={"child_id": self.child_id, "note": "确认时补充"},
+        )
+        self.assertEqual(update_context.status_code, 200)
+        self.assertEqual(update_context.json()["note"], "确认时补充")
 
         ready_items = self.client.get(
             "/observations", params={"status": "ready_for_review"}
@@ -142,6 +143,69 @@ class ObservationStatusFlowTest(unittest.TestCase):
         retried = self.client.post(f"/observations/{observation_id}/narrative")
         self.assertEqual(retried.status_code, 200)
         self.assertEqual(retried.json()["status"], "processing")
+
+    def test_quick_capture_defaults_media_inference_and_child_update(self):
+        created = self.client.post("/observations", json={"area_id": self.area_id})
+        self.assertEqual(created.status_code, 201)
+        observation = created.json()
+        self.assertEqual(observation["status"], "uploaded")
+        self.assertIsNone(observation["child_id"])
+        self.assertEqual(observation["classroom_id"], 1)
+        self.assertEqual(observation["age_group"], "middle")
+        self.assertIsNone(observation["media_type"])
+
+        missing_area = self.client.post("/observations", json={})
+        self.assertEqual(missing_area.status_code, 422)
+
+        jpg = self.client.post(
+            "/uploads",
+            files={"file": ("mock.jpg", b"mock-image", "image/jpeg")},
+        )
+        self.assertEqual(jpg.status_code, 201)
+        attached_jpg = self.client.post(
+            f"/observations/{observation['id']}/attach-media",
+            params={"media_id": jpg.json()["id"]},
+        )
+        self.assertEqual(attached_jpg.status_code, 200)
+        self.assertEqual(attached_jpg.json()["media_type"], "image")
+
+        second_media = self.client.post(
+            "/uploads",
+            files={"file": ("second.mp4", b"second-video", "video/mp4")},
+        )
+        attached_second = self.client.post(
+            f"/observations/{observation['id']}/attach-media",
+            params={"media_id": second_media.json()["id"]},
+        )
+        self.assertEqual(attached_second.status_code, 200)
+        self.assertEqual(attached_second.json()["media_type"], "image")
+
+        video_observation = self.client.post(
+            "/observations", json={"area_id": self.area_id}
+        ).json()
+        mp4 = self.client.post(
+            "/uploads",
+            files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
+        )
+        self.assertEqual(mp4.status_code, 201)
+        attached_mp4 = self.client.post(
+            f"/observations/{video_observation['id']}/attach-media",
+            params={"media_id": mp4.json()["id"]},
+        )
+        self.assertEqual(attached_mp4.status_code, 200)
+        self.assertEqual(attached_mp4.json()["media_type"], "video")
+
+        original_classroom_id = observation["classroom_id"]
+        original_age_group = observation["age_group"]
+        updated = self.client.patch(
+            f"/observations/{observation['id']}",
+            json={"child_id": self.child_id, "note": "回看时确认幼儿"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["child_id"], self.child_id)
+        self.assertEqual(updated.json()["note"], "回看时确认幼儿")
+        self.assertEqual(updated.json()["classroom_id"], original_classroom_id)
+        self.assertEqual(updated.json()["age_group"], original_age_group)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from typing import Optional
 from datetime import datetime
 from sqlmodel import SQLModel, Field, create_engine
+from config import DATABASE_PATH
 
 
 # ========== 表1：游戏区域 ==========
@@ -28,16 +29,17 @@ class Child(SQLModel, table=True):
 class Observation(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    child_id: int = Field(foreign_key="child.id")
+    child_id: Optional[int] = Field(default=None, foreign_key="child.id")
     area_id: int = Field(foreign_key="area.id")
     classroom_id: Optional[int] = Field(default=None, foreign_key="classroom.id")
 
     observed_at: datetime = Field(default_factory=datetime.now)
     age_group: str      # 快照：拍摄当时的年龄段。孩子会升班，历史记录的判定依据不能跟着变
-    media_type: str     # photo / video
+    media_type: Optional[str] = None  # image / video；绑定首个素材时由 MIME 推断
 
     # ---- 一份完整观察记录的四段，格式来自真实教研文书 ----
     purpose: Optional[str] = None      # ① 观察目的（教师拍摄前就预设好的）
+    note: Optional[str] = None         # 现场一句话补充，教师可稍后修改
     narrative: Optional[str] = None    # ② 客观白描
     analysis: Optional[str] = None     # ③ 观察分析（教师主笔）
     strategy: Optional[str] = None     # ④ 措施（教师主笔，AI 最做不好的一栏）
@@ -88,7 +90,7 @@ class ObservationTag(SQLModel, table=True):
 
 
 # ========== 数据库连接 ==========
-engine = create_engine("sqlite:///bangbang.db", echo=True)
+engine = create_engine(f"sqlite:///{DATABASE_PATH}", echo=True)
 
 
 def init_db():
