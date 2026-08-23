@@ -70,8 +70,8 @@ export function ObservationReviewPage() {
   const acceptedTags = record?.tags.filter((tag) => tag.accepted === true) ?? [];
 
   useEffect(() => {
-    if (!record || record.status !== "ready_for_review") return;
-    const key = `${record.id}:${record.ready_at ?? "ready"}`;
+    if (!record || !["ready_for_review", "confirmed"].includes(record.status)) return;
+    const key = `${record.id}:${record.ready_at ?? "ready"}:${record.confirmed_at ?? "draft"}`;
     if (initializedKey.current !== key) {
       initializedKey.current = key;
       const initialFields = {
@@ -137,6 +137,17 @@ export function ObservationReviewPage() {
     }
   }
 
+  async function saveAndReturnToDetail() {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    try {
+      await updateObservation.mutateAsync(fieldsRef.current);
+      navigate(`/observations/${id}`);
+    } catch {
+      // 保留当前输入和页面，让教师直接重试。
+    }
+  }
+
   function requestConfirmation() {
     if (!record?.child_id) return;
     if (!fields.analysis.trim() || !fields.strategy.trim()) {
@@ -176,20 +187,28 @@ export function ObservationReviewPage() {
   }
 
   const media = record.media[0];
+  const isConfirmedEditing = record.status === "confirmed";
 
   return (
     <MobilePage>
       <div className="px-5 pb-28 pt-5">
         <header className="mb-5 flex items-center gap-3">
           <Link
-            aria-label="返回今日素材"
+            aria-label={isConfirmedEditing ? "返回观察记录详情" : "返回今日素材"}
             className="grid size-11 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-sm"
-            onClick={flushFields}
-            to="/"
+            onClick={(event) => {
+              if (isConfirmedEditing) {
+                event.preventDefault();
+                void saveAndReturnToDetail();
+              } else {
+                flushFields();
+              }
+            }}
+            to={isConfirmedEditing ? `/observations/${id}` : "/"}
           >
             <ArrowLeft size={22} />
           </Link>
-          <h1 className="text-2xl font-bold tracking-[-0.02em]">整理这条记录</h1>
+          <h1 className="text-2xl font-bold tracking-[-0.02em]">{isConfirmedEditing ? "继续编辑" : "整理这条记录"}</h1>
         </header>
 
         <section className="mb-6 overflow-hidden rounded-3xl bg-surface shadow-sm">
@@ -277,7 +296,7 @@ export function ObservationReviewPage() {
           </section>
         )}
 
-        {record.status === "ready_for_review" && showIndicators && (
+        {["ready_for_review", "confirmed"].includes(record.status) && showIndicators && (
           <div className="space-y-8">
             <section aria-labelledby="purpose-heading">
               <label className="block text-base font-bold" htmlFor="purpose" id="purpose-heading">观察目的</label>
@@ -378,13 +397,6 @@ export function ObservationReviewPage() {
           </section>
         )}
 
-        {record.status === "confirmed" && (
-          <section className="rounded-3xl bg-surface p-5 text-center shadow-sm">
-            <p className="font-bold">这条记录已经完成</p>
-            <Link className="mt-4 inline-flex min-h-11 items-center px-5 font-bold text-brand" to={`/observations/${id}`}>查看详情</Link>
-          </section>
-        )}
-
         {generation.isError && record.status !== "failed" && (
           <p className="mt-4 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">这次没有整理成功，请重新试一次</p>
         )}
@@ -427,6 +439,18 @@ export function ObservationReviewPage() {
             type="button"
           >
             {confirmation.isPending ? "正在确认…" : "确认完成"}
+          </button>
+        </div>
+      )}
+
+      {record.status === "confirmed" && showIndicators && (
+        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
+          <button
+            className="min-h-14 w-full rounded-2xl bg-brand text-lg font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            onClick={() => void saveAndReturnToDetail()}
+            type="button"
+          >
+            保存并返回详情
           </button>
         </div>
       )}

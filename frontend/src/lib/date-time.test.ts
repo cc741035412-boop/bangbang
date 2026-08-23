@@ -1,5 +1,6 @@
 import {
   compareTimestampsDescending,
+  formatKindergartenDateTime,
   formatKindergartenTime,
   isKindergartenToday,
   parseApiTimestamp,
@@ -13,6 +14,7 @@ describe("date-time", () => {
 
   it("always formats in the kindergarten's Beijing timezone", () => {
     expect(formatKindergartenTime("2026-08-23T14:18:00Z")).toBe("22:18");
+    expect(formatKindergartenDateTime("2026-08-23T14:18:00Z")).toBe("2026年8月23日 22:18");
   });
 
   it("uses the Beijing date boundary for today's list", () => {

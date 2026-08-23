@@ -162,6 +162,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
         confirmed_observation = confirmed.json()["observation"]
         self.assertEqual(confirmed_observation["status"], "confirmed")
         self.assertIsNotNone(confirmed_observation["confirmed_at"])
+        detail = self.client.get(f"/observations/{observation_id}").json()
+        self.assertEqual(detail["child_confirmed_count"], 1)
 
     def test_confirmation_requires_child_without_changing_age_snapshot(self):
         created = self.client.post("/observations", json={"area_id": self.area_id}).json()

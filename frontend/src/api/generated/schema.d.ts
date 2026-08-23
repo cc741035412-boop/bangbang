@@ -240,7 +240,7 @@ export interface paths {
         put?: never;
         /**
          * Confirm Observation
-         * @description 教师定稿。要求白描和至少一个已采纳的指标都到位。
+         * @description 教师定稿。要求幼儿、白描和至少一个已采纳的指标都到位。
          */
         post: operations["confirm_observation_observations__obs_id__confirm_post"];
         delete?: never;
@@ -497,6 +497,11 @@ export interface components {
             classroom_name?: string | null;
             /** Area Name */
             area_name?: string | null;
+            /**
+             * Child Confirmed Count
+             * @default 0
+             */
+            child_confirmed_count: number;
             /** Media */
             media: components["schemas"]["MediaResponse"][];
             /** Tags */

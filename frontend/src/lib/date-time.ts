@@ -16,6 +16,16 @@ const KINDERGARTEN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   timeZone: KINDERGARTEN_TIME_ZONE,
 });
 
+const KINDERGARTEN_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: KINDERGARTEN_TIME_ZONE,
+});
+
 const KINDERGARTEN_DATE_KEY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   year: "numeric",
   month: "2-digit",
@@ -29,6 +39,10 @@ export function parseApiTimestamp(value: string) {
 
 export function formatKindergartenTime(value: string) {
   return KINDERGARTEN_TIME_FORMATTER.format(parseApiTimestamp(value));
+}
+
+export function formatKindergartenDateTime(value: string) {
+  return KINDERGARTEN_DATE_TIME_FORMATTER.format(parseApiTimestamp(value));
 }
 
 export function formatKindergartenToday() {

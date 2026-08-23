@@ -9,7 +9,7 @@ describe("AppRoutes", () => {
     ["/", "今日素材"],
     ["/capture", "快速沉淀"],
     ["/observations/12/review", "正在打开这条记录…"],
-    ["/observations/12", "观察记录详情"],
+    ["/observations/12", "正在打开观察记录…"],
   ])("renders %s", (path, heading) => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(

@@ -20,6 +20,7 @@ import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from models import (
@@ -179,6 +180,7 @@ class ObservationDetailResponse(ObservationResponse):
     child_name: Optional[str] = None
     classroom_name: Optional[str] = None
     area_name: Optional[str] = None
+    child_confirmed_count: int = 0
     media: List[MediaResponse]
     tags: List[ObservationTagResponse]
 
@@ -926,12 +928,21 @@ def get_observation_detail(obs_id: int):
         tags = s.exec(
             select(ObservationTag).where(ObservationTag.observation_id == obs_id)
         ).all()
+        child_confirmed_count = 0
+        if obs.child_id is not None:
+            child_confirmed_count = s.exec(
+                select(func.count(Observation.id)).where(
+                    Observation.child_id == obs.child_id,
+                    Observation.status == "confirmed",
+                )
+            ).one()
 
         return ObservationDetailResponse(
             **obs.model_dump(),
             child_name=child.name if child else None,
             classroom_name=room.name if room else None,
             area_name=area.name if area else None,
+            child_confirmed_count=child_confirmed_count,
             media=media,
             tags=tags,
         )
