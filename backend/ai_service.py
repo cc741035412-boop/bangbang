@@ -346,10 +346,19 @@ def _validate_model_suggestions(
         reason = reason.strip()
 
         fragments = _extract_quoted_fragments(reason)
-        evidence_based = any(
-            _loosely_contains(narrative, fragment) for fragment in fragments
-        )
-        if not evidence_based:
+        matching_fragments = [
+            fragment
+            for fragment in fragments
+            if _loosely_contains(narrative, fragment)
+        ]
+        evidence_based = bool(matching_fragments)
+        if evidence_based:
+            # 模型可能先给出真实引用，再在引号外夹带无依据推断。
+            # 只保留已通过原文检查的引用，避免“真引用掩护假解释”。
+            reason = "白描原文：" + "；".join(
+                f"“{fragment}”" for fragment in matching_fragments
+            )
+        else:
             if raw.get("evidence_based") is True:
                 warnings.append(
                     f"第 {index} 条指标 {code} 的原文引用无法在白描中找到，"

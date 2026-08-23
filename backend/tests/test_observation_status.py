@@ -20,6 +20,8 @@ from models import AIRun, Area, Child, ClassRoom, Observation, ObservationTag
 class ObservationStatusFlowTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.ai_mode_patcher = patch.object(main.ai_service, "AI_MODE", "mock")
+        self.ai_mode_patcher.start()
         engine = create_engine(
             "sqlite://",
             connect_args={"check_same_thread": False},
@@ -47,6 +49,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
             self.child_id = child.id
 
     def tearDown(self):
+        self.ai_mode_patcher.stop()
         self.temp_dir.cleanup()
 
     def create_bound_observation(self):
@@ -527,6 +530,10 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertFalse(body["is_mock"])
         self.assertEqual([item["indicator_code"] for item in body["suggestions"]], ["4.4", "1.2"])
         self.assertTrue(body["suggestions"][0]["evidence_based"])
+        self.assertEqual(
+            body["suggestions"][0]["reason"],
+            "白描原文：“调整了间距后继续摆放”",
+        )
         self.assertFalse(body["suggestions"][1]["evidence_based"])
         self.assertEqual(body["suggestions"][1]["confidence"], 0.42)
 
