@@ -6,6 +6,9 @@
   --color-ink: #242520;
   --color-ink-muted: #676960;
   --color-brand: #31745a;
+  --color-brand-deep: #225440;
+  --color-brand-soft: #dcebe3;
+  --color-thumbnail: #e6eee8;
   --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 }
 
@@ -24,6 +27,7 @@
     min-height: 100vh;
     background: var(--color-canvas);
     font-family: var(--font-sans);
+    color: var(--color-ink);
   }
 
   button,
@@ -31,5 +35,11 @@
   select,
   textarea {
     font: inherit;
+  }
+}
+
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 }

@@ -136,7 +136,7 @@ export interface paths {
         put?: never;
         /**
          * Create Observation
-         * @description 新建观察记录；状态固定由后端初始化为 uploaded。
+         * @description 现场新建观察记录；只要求游戏区，状态固定为 uploaded。
          */
         post: operations["create_observation_observations_post"];
         delete?: never;
@@ -184,7 +184,7 @@ export interface paths {
         head?: never;
         /**
          * Update Observation
-         * @description 教师修改观察目的 / 白描 / 分析 / 措施
+         * @description 教师补幼儿和现场说明，或修改观察目的 / 白描 / 分析 / 措施。
          */
         patch: operations["update_observation_observations__obs_id__patch"];
         trace?: never;
@@ -362,28 +362,22 @@ export interface components {
         };
         /**
          * ObservationCreate
-         * @description 新建观察记录。状态与阶段时间戳只由后端维护。
+         * @description 现场新建观察记录；班级、年龄段、素材类型和状态由后端维护。
          */
         ObservationCreate: {
-            /** Child Id */
-            child_id: number;
             /** Area Id */
             area_id: number;
-            /** Age Group */
-            age_group: string;
-            /** Media Type */
-            media_type: string;
-            /** Observed At */
-            observed_at?: string | null;
-            /** Purpose */
-            purpose?: string | null;
+            /** Child Id */
+            child_id?: number | null;
+            /** Note */
+            note?: string | null;
         };
         /** ObservationDetailResponse */
         ObservationDetailResponse: {
             /** Id */
             id: number;
             /** Child Id */
-            child_id: number;
+            child_id?: number | null;
             /** Area Id */
             area_id: number;
             /** Classroom Id */
@@ -396,9 +390,11 @@ export interface components {
             /** Age Group */
             age_group: string;
             /** Media Type */
-            media_type: string;
+            media_type?: string | null;
             /** Purpose */
             purpose?: string | null;
+            /** Note */
+            note?: string | null;
             /** Narrative */
             narrative?: string | null;
             /** Analysis */
@@ -443,7 +439,7 @@ export interface components {
             /** Id */
             id: number;
             /** Child Id */
-            child_id: number;
+            child_id?: number | null;
             /** Area Id */
             area_id: number;
             /** Classroom Id */
@@ -456,9 +452,11 @@ export interface components {
             /** Age Group */
             age_group: string;
             /** Media Type */
-            media_type: string;
+            media_type?: string | null;
             /** Purpose */
             purpose?: string | null;
+            /** Note */
+            note?: string | null;
             /** Narrative */
             narrative?: string | null;
             /** Analysis */
@@ -520,9 +518,13 @@ export interface components {
         };
         /**
          * ObservationUpdate
-         * @description 教师修改观察记录的文字部分
+         * @description 教师补观察对象、现场说明，或修改观察记录的四段正文。
          */
         ObservationUpdate: {
+            /** Child Id */
+            child_id?: number | null;
+            /** Note */
+            note?: string | null;
             /** Purpose */
             purpose?: string | null;
             /** Narrative */
