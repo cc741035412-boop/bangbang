@@ -4,6 +4,7 @@ import { apiClient } from "../../api/client";
 import type { components } from "../../api/generated/schema";
 
 export type Observation = components["schemas"]["ObservationResponse"];
+export type ObservationDetail = components["schemas"]["ObservationDetailResponse"];
 export interface Area { id: number; code: string; name: string }
 export interface Child { id: number; name: string; classroom_id: number }
 export interface Media {
@@ -22,7 +23,19 @@ const queryKeys = {
   areas: ["areas"] as const,
   children: ["children"] as const,
   media: ["media"] as const,
+  observation: (id: number) => ["observations", id] as const,
 };
+
+export interface NarrativeGenerationResult {
+  observation_id: number;
+  status: "ready_for_review";
+  processing_started_at: string;
+  ready_at: string;
+  narrative: string;
+  is_mock: boolean;
+  engine: string;
+  notice: string;
+}
 
 function ensureArray<T>(data: unknown, resourceName: string): T[] {
   if (!Array.isArray(data)) throw new Error(`${resourceName}返回格式不正确`);
@@ -53,6 +66,14 @@ async function getMedia() {
   return ensureArray<Media>(data, "素材信息");
 }
 
+async function getObservation(id: number) {
+  const { data, error } = await apiClient.GET("/observations/{obs_id}", {
+    params: { path: { obs_id: id } },
+  });
+  if (error || !data) throw new Error("这条记录暂时加载失败");
+  return data;
+}
+
 export function useTodayMediaData() {
   const observations = useQuery({ queryKey: queryKeys.observations, queryFn: getObservations });
   const areas = useQuery({ queryKey: queryKeys.areas, queryFn: getAreas });
@@ -63,6 +84,77 @@ export function useTodayMediaData() {
 
 export function useAreas() {
   return useQuery({ queryKey: queryKeys.areas, queryFn: getAreas });
+}
+
+export function useObservation(id: number) {
+  return useQuery({
+    enabled: Number.isInteger(id) && id > 0,
+    queryKey: queryKeys.observation(id),
+    queryFn: () => getObservation(id),
+    refetchOnMount: "always",
+    refetchInterval: (query) => (
+      query.state.data?.status === "processing" ? 3000 : false
+    ),
+  });
+}
+
+function updateObservationStatus(
+  queryClient: ReturnType<typeof useQueryClient>,
+  id: number,
+  status: Observation["status"],
+) {
+  queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+    current ? { ...current, status } : current
+  ));
+  queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
+    current?.map((item) => item.id === id ? { ...item, status } : item)
+  ));
+}
+
+export function useGenerateNarrative(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await apiClient.POST("/observations/{obs_id}/narrative", {
+        params: { path: { obs_id: id } },
+      });
+      if (error || !data) throw new CaptureError("这次没有整理成功，请重新试一次");
+      return data as NarrativeGenerationResult;
+    },
+    onMutate: () => updateObservationStatus(queryClient, id, "processing"),
+    onSuccess: (result) => {
+      if (result.is_mock) sessionStorage.setItem(`narrative-is-mock:${id}`, "true");
+      updateObservationStatus(queryClient, id, result.status);
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.observations }),
+      ]);
+    },
+  });
+}
+
+export function useSaveNarrative(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (narrative: string) => {
+      const { data, error } = await apiClient.PATCH("/observations/{obs_id}", {
+        params: { path: { obs_id: id } },
+        body: { narrative },
+      });
+      if (error || !data) throw new Error("白描暂时没有保存成功");
+      return data as Observation;
+    },
+    onSuccess: (saved) => {
+      queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
+        current ? { ...current, ...saved } : current
+      ));
+      queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
+        current?.map((item) => item.id === id ? { ...item, ...saved } : item)
+      ));
+    },
+  });
 }
 
 interface CaptureProgress { mediaId?: number; observationId?: number }

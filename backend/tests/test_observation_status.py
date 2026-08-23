@@ -1,5 +1,7 @@
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -91,8 +93,10 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
         narrative = self.client.post(f"/observations/{observation_id}/narrative")
         self.assertEqual(narrative.status_code, 200)
-        self.assertEqual(narrative.json()["status"], "processing")
+        self.assertEqual(narrative.json()["status"], "ready_for_review")
         self.assertIsNotNone(narrative.json()["processing_started_at"])
+        self.assertIsNotNone(narrative.json()["ready_at"])
+        self.assertTrue(narrative.json()["is_mock"])
 
         suggestions = self.client.post(f"/observations/{observation_id}/suggest-tags")
         self.assertEqual(suggestions.status_code, 200)
@@ -144,7 +148,36 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
         retried = self.client.post(f"/observations/{observation_id}/narrative")
         self.assertEqual(retried.status_code, 200)
-        self.assertEqual(retried.json()["status"], "processing")
+        self.assertEqual(retried.json()["status"], "ready_for_review")
+        self.assertIsNotNone(retried.json()["ready_at"])
+
+    def test_processing_status_is_visible_while_ai_is_running(self):
+        observation_id = self.create_bound_observation()
+        started = threading.Event()
+        release = threading.Event()
+        original_generate = main.ai_service.generate_narrative
+
+        def slow_generate(*args, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return original_generate(*args, **kwargs)
+
+        with patch.object(main.ai_service, "generate_narrative", side_effect=slow_generate):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    self.client.post,
+                    f"/observations/{observation_id}/narrative",
+                )
+                self.assertTrue(started.wait(timeout=2))
+                processing = self.client.get(f"/observations/{observation_id}")
+                self.assertEqual(processing.json()["status"], "processing")
+                self.assertIsNotNone(processing.json()["processing_started_at"])
+                self.assertIsNone(processing.json()["ready_at"])
+                release.set()
+                completed = future.result(timeout=2)
+
+        self.assertEqual(completed.json()["status"], "ready_for_review")
+        self.assertIsNotNone(completed.json()["ready_at"])
 
     def test_quick_capture_defaults_media_inference_and_child_update(self):
         created = self.client.post("/observations", json={"area_id": self.area_id})

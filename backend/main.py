@@ -164,6 +164,17 @@ class MediaResponse(BaseModel):
     thumbnail_failure_reason: Optional[str] = None
 
 
+class NarrativeGenerationResponse(BaseModel):
+    observation_id: int
+    status: ObservationStatus
+    processing_started_at: datetime
+    ready_at: datetime
+    narrative: str
+    is_mock: bool
+    engine: str
+    notice: str
+
+
 class ObservationDetailResponse(ObservationResponse):
     child_name: Optional[str] = None
     classroom_name: Optional[str] = None
@@ -596,7 +607,11 @@ def confirm_observation(obs_id: int):
 # 3. AI 环节（当前为 DEMO MOCK）
 # ============================================================
 
-@app.post("/observations/{obs_id}/narrative", tags=["3·AI（mock）"])
+@app.post(
+    "/observations/{obs_id}/narrative",
+    response_model=NarrativeGenerationResponse,
+    tags=["3·AI（mock）"],
+)
 def generate_narrative(obs_id: int):
     """
     【AI 工作流 A】根据绑定的素材生成客观白描。
@@ -638,6 +653,7 @@ def generate_narrative(obs_id: int):
         obs.narrative = result["narrative"]
         obs.narrative_ai_raw = result["narrative"]   # 留底，用来对比教师改了多少
         obs.narrative_source = "ai"
+        transition_observation(obs, "ready_for_review")
         s.add(obs)
         s.commit()
         s.refresh(obs)
@@ -646,6 +662,7 @@ def generate_narrative(obs_id: int):
             "observation_id": obs_id,
             "status": obs.status,
             "processing_started_at": obs.processing_started_at,
+            "ready_at": obs.ready_at,
             "narrative": result["narrative"],
             "is_mock": result["is_mock"],
             "engine": result["engine"],
@@ -673,7 +690,7 @@ def suggest_tags(obs_id: int):
             s.add(obs)
             s.commit()
             s.refresh(obs)
-        elif obs.status != "processing":
+        elif obs.status not in {"processing", "ready_for_review"}:
             ensure_status_transition(obs, "ready_for_review")
 
         area = s.get(Area, obs.area_id)
@@ -734,7 +751,8 @@ def suggest_tags(obs_id: int):
                 "rank": tag.rank_in_suggestion,
             })
 
-        transition_observation(obs, "ready_for_review")
+        if obs.status == "processing":
+            transition_observation(obs, "ready_for_review")
         s.add(obs)
         s.commit()
         s.refresh(obs)

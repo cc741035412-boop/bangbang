@@ -8,7 +8,7 @@ describe("AppRoutes", () => {
   it.each([
     ["/", "今日素材"],
     ["/capture", "快速沉淀"],
-    ["/observations/12/review", "AI 整理与教师确认"],
+    ["/observations/12/review", "正在打开这条记录…"],
     ["/observations/12", "观察记录详情"],
   ])("renders %s", (path, heading) => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

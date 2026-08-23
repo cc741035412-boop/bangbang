@@ -402,6 +402,34 @@ export interface components {
             /** Thumbnail Failure Reason */
             thumbnail_failure_reason?: string | null;
         };
+        /** NarrativeGenerationResponse */
+        NarrativeGenerationResponse: {
+            /** Observation Id */
+            observation_id: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "uploaded" | "processing" | "ready_for_review" | "confirmed" | "failed";
+            /**
+             * Processing Started At
+             * Format: date-time
+             */
+            processing_started_at: string;
+            /**
+             * Ready At
+             * Format: date-time
+             */
+            ready_at: string;
+            /** Narrative */
+            narrative: string;
+            /** Is Mock */
+            is_mock: boolean;
+            /** Engine */
+            engine: string;
+            /** Notice */
+            notice: string;
+        };
         /**
          * ObservationCreate
          * @description 现场新建观察记录；班级、年龄段、素材类型和状态由后端维护。
@@ -1041,7 +1069,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NarrativeGenerationResponse"];
                 };
             };
             /** @description Validation Error */

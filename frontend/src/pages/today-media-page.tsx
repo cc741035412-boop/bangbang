@@ -1,14 +1,10 @@
-import { Image as ImageIcon, Plus, RotateCcw, Video } from "lucide-react";
+import { Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 
+import { MediaThumbnail } from "../components/media-thumbnail";
 import { MobilePage } from "../components/mobile-page";
-import {
-  getMediaFileUrl,
-  getMediaThumbnailUrl,
-  type Media,
-  useTodayMediaData,
-} from "../features/observations/api";
+import { useTodayMediaData } from "../features/observations/api";
 import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
 import {
   compareTimestampsDescending,
@@ -18,36 +14,6 @@ import {
 } from "../lib/date-time";
 
 interface SuccessState { captureDuration?: number }
-
-function MediaThumbnail({ media, isVideo }: { media?: Media; isVideo: boolean }) {
-  const [hasError, setHasError] = useState(false);
-
-  if (!media || hasError) {
-    return isVideo
-      ? <Video aria-label="视频素材" size={28} strokeWidth={1.8} />
-      : <ImageIcon aria-label="图片素材" size={28} strokeWidth={1.8} />;
-  }
-
-  if (isVideo) {
-    return (
-      <img
-        alt="视频缩略图"
-        className="size-full object-cover"
-        onError={() => setHasError(true)}
-        src={getMediaThumbnailUrl(media.id)}
-      />
-    );
-  }
-
-  return (
-    <img
-      alt="素材缩略图"
-      className="size-full object-cover"
-      onError={() => setHasError(true)}
-      src={getMediaFileUrl(media.id)}
-    />
-  );
-}
 
 export function TodayMediaPage() {
   const navigate = useNavigate();
@@ -145,31 +111,40 @@ export function TodayMediaPage() {
           {visibleRecords.map((record) => {
             const status = OBSERVATION_STATUS_META[record.status];
             const itemMedia = mediaByObservation.get(record.id);
-            const isVideo = itemMedia?.content_type.startsWith("video/") || record.media_type === "video";
+            const reviewPath = `/observations/${record.id}/review`;
+            const destination = record.status === "confirmed"
+              ? `/observations/${record.id}`
+              : reviewPath;
             return (
-              <article className="flex gap-4 rounded-3xl bg-surface p-3 shadow-sm" key={record.id}>
-                <div className="grid size-[84px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-thumbnail text-brand-deep">
-                  <MediaThumbnail isVideo={isVideo} media={itemMedia} />
-                </div>
+              <Link
+                aria-label={`打开${areaNames.get(record.area_id) ?? "未知区域"}记录`}
+                className="flex gap-4 rounded-3xl bg-surface p-3 text-inherit shadow-sm"
+                key={record.id}
+                to={destination}
+              >
+                <MediaThumbnail
+                  className="size-[84px] shrink-0 rounded-2xl"
+                  media={itemMedia}
+                  mediaType={record.media_type}
+                />
                 <div className="min-w-0 flex-1 py-1">
                   <div className="flex items-start justify-between gap-2">
                     <p className="truncate font-bold">
                       {areaNames.get(record.area_id) ?? "未知区域"} · {formatLocalTime(record.created_at ?? record.observed_at)}
                     </p>
-                    <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${status.className}`}>
+                    <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${status.className}`}>
+                      {record.status === "processing" && (
+                        <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-current" />
+                      )}
                       {status.label}
                     </span>
                   </div>
                   <p className={`mt-3 text-sm ${record.child_id == null ? "text-stone-400" : "text-ink-muted"}`}>
                     {record.child_id == null ? "未指定幼儿" : childNames.get(record.child_id) ?? "幼儿信息待同步"}
                   </p>
-                  {record.status === "failed" && (
-                    <Link className="mt-2 inline-flex min-h-8 items-center text-sm font-bold text-red-700" to={`/observations/${record.id}/review`}>
-                      重试
-                    </Link>
-                  )}
+                  {record.status === "failed" && <span className="mt-2 inline-flex min-h-8 items-center text-sm font-bold text-red-700">点开重试</span>}
                 </div>
-              </article>
+              </Link>
             );
           })}
         </section>
