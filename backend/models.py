@@ -46,9 +46,14 @@ class Observation(SQLModel, table=True):
     narrative_source: Optional[str] = None    # ai / ai_edited / manual
     narrative_ai_raw: Optional[str] = None    # 留着对比教师改了多少
 
-    status: str = "draft"                     # draft=草稿 / confirmed=教师已确认
+    # uploaded → processing → ready_for_review → confirmed
+    #                       ↘ failed → processing（重试）
+    status: str = "uploaded"
     created_at: datetime = Field(default_factory=datetime.now)
+    processing_started_at: Optional[datetime] = None
+    ready_at: Optional[datetime] = None
     confirmed_at: Optional[datetime] = None
+    failure_reason: Optional[str] = None
 
 
 # ========== 表5：素材 ==========

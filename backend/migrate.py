@@ -1,16 +1,15 @@
-"""
-一次性迁移脚本：
-1. 新建 media、observationtag 两张新表
-2. 给已存在的 observation 表补上新字段（不动已有数据）
-
-可以重复运行，已经加过的字段会自动跳过。
-"""
+"""SQLite 就地迁移脚本，可重复运行，不删表、不重建数据库。"""
 
 import sqlite3
+import shutil
+from datetime import datetime
+from pathlib import Path
+
 from sqlmodel import SQLModel
 from models import engine  # noqa: F401  导入 models 才能让 SQLModel 知道有哪些表
 
-DB_FILE = "bangbang.db"
+DB_FILE = Path("bangbang.db")
+BACKUP_DIR = Path("backups")
 
 # 要给 observation 表补的字段：(字段名, SQLite 类型)
 # 全部允许为空，这样已有的那条测试数据不会报错
@@ -23,8 +22,49 @@ NEW_OBSERVATION_COLUMNS = [
     ("analysis",         "TEXT"),
     ("strategy",         "TEXT"),
     ("created_at",       "DATETIME"),
+    ("processing_started_at", "DATETIME"),
+    ("ready_at",              "DATETIME"),
     ("confirmed_at",     "DATETIME"),
+    ("failure_reason",        "TEXT"),
 ]
+
+
+def backup_database():
+    """任何结构或数据迁移前先创建带时间戳的数据库副本。"""
+    if not DB_FILE.exists():
+        print("⓪ 数据库尚不存在，无需备份")
+        return None
+
+    BACKUP_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    backup_file = BACKUP_DIR / f"bangbang-{stamp}.db"
+    shutil.copy2(DB_FILE, backup_file)
+    print(f"⓪ 迁移前备份：{backup_file}")
+    return backup_file
+
+
+def observation_summary(label):
+    """打印迁移前后记录数和状态分布。"""
+    if not DB_FILE.exists():
+        print(f"{label}：observation=0，状态分布={{}}")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    table_exists = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='observation'"
+    ).fetchone()
+    if not table_exists:
+        conn.close()
+        print(f"{label}：observation=0，状态分布={{}}")
+        return
+
+    count = cur.execute("SELECT COUNT(*) FROM observation").fetchone()[0]
+    distribution = dict(cur.execute(
+        "SELECT status, COUNT(*) FROM observation GROUP BY status ORDER BY status"
+    ).fetchall())
+    conn.close()
+    print(f"{label}：observation={count}，状态分布={distribution}")
 
 
 def create_new_tables():
@@ -57,6 +97,19 @@ def add_missing_columns():
         print("② observation 表字段已齐全，无需改动")
 
 
+def migrate_status_values():
+    """把旧状态映射到新状态；已迁移数据重复运行不会变化。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE observation SET status = 'ready_for_review' WHERE status = 'draft'"
+    )
+    migrated = cur.rowcount
+    conn.commit()
+    conn.close()
+    print(f"③ 状态迁移：draft → ready_for_review，共 {migrated} 条")
+
+
 def show_result():
     """把最终结果打出来，方便肉眼确认"""
     conn = sqlite3.connect(DB_FILE)
@@ -77,7 +130,11 @@ def show_result():
 
 
 if __name__ == "__main__":
+    backup_database()
+    observation_summary("迁移前")
     create_new_tables()
     add_missing_columns()
+    migrate_status_values()
+    observation_summary("迁移后")
     show_result()
-    print("\n✅ 迁移完成，原有数据一条没动")
+    print("\n✅ 迁移完成：未删表、未重建数据库")

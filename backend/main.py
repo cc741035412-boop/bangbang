@@ -12,10 +12,10 @@
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import Session, select
 
 from models import (
@@ -64,6 +64,72 @@ class ObservationUpdate(BaseModel):
     narrative: Optional[str] = None
     analysis: Optional[str] = None
     strategy: Optional[str] = None
+
+
+class ObservationCreate(BaseModel):
+    """新建观察记录。状态与阶段时间戳只由后端维护。"""
+    model_config = ConfigDict(extra="forbid")
+
+    child_id: int
+    area_id: int
+    age_group: str
+    media_type: str
+    observed_at: Optional[datetime] = None
+    purpose: Optional[str] = None
+
+
+ObservationStatus = Literal[
+    "uploaded",
+    "processing",
+    "ready_for_review",
+    "confirmed",
+    "failed",
+]
+
+ALLOWED_STATUS_TRANSITIONS = {
+    "uploaded": {"processing"},
+    "processing": {"ready_for_review", "failed"},
+    "ready_for_review": {"confirmed"},
+    "confirmed": set(),
+    "failed": {"processing"},
+}
+
+
+def ensure_status_transition(obs: Observation, target_status: str):
+    """非法流转统一返回当前状态和目标状态。"""
+    allowed_targets = ALLOWED_STATUS_TRANSITIONS.get(obs.status, set())
+    if target_status not in allowed_targets:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"不允许从 {obs.status} 流转到 {target_status}",
+                "current_status": obs.status,
+                "target_status": target_status,
+            },
+        )
+
+
+def transition_observation(
+    obs: Observation,
+    target_status: str,
+    *,
+    failure_reason: Optional[str] = None,
+):
+    """执行合法状态流转并记录对应阶段时间戳。"""
+    ensure_status_transition(obs, target_status)
+    now = datetime.now()
+    obs.status = target_status
+
+    if target_status == "processing":
+        obs.processing_started_at = now
+        obs.failure_reason = None
+    elif target_status == "ready_for_review":
+        obs.ready_at = now
+        obs.failure_reason = None
+    elif target_status == "confirmed":
+        obs.confirmed_at = now
+    elif target_status == "failed":
+        obs.failure_reason = failure_reason or "AI 处理失败"
 
 
 # ============================================================
@@ -143,15 +209,23 @@ def list_media():
 # ============================================================
 
 @app.post("/observations", status_code=201, tags=["2·观察记录"])
-def create_observation(observation: Observation):
-    """新建一条观察记录草稿"""
+def create_observation(payload: ObservationCreate):
+    """新建观察记录；状态固定由后端初始化为 uploaded。"""
     with Session(engine) as s:
         # 自动补班级：从幼儿身上带出来，教师不用填
-        child = s.get(Child, observation.child_id)
+        child = s.get(Child, payload.child_id)
         if not child:
-            raise HTTPException(404, f"找不到 id={observation.child_id} 的幼儿")
-        observation.classroom_id = child.classroom_id
-        observation.status = "draft"
+            raise HTTPException(404, f"找不到 id={payload.child_id} 的幼儿")
+        observation = Observation(
+            child_id=payload.child_id,
+            area_id=payload.area_id,
+            classroom_id=child.classroom_id,
+            observed_at=payload.observed_at or datetime.now(),
+            age_group=payload.age_group,
+            media_type=payload.media_type,
+            purpose=payload.purpose,
+            status="uploaded",
+        )
         s.add(observation)
         s.commit()
         s.refresh(observation)
@@ -159,10 +233,15 @@ def create_observation(observation: Observation):
 
 
 @app.get("/observations", tags=["2·观察记录"])
-def list_observations():
-    """所有观察记录（简要）"""
+def list_observations(
+    status: Optional[ObservationStatus] = Query(None, description="按处理状态过滤"),
+):
+    """所有观察记录（简要），可按状态过滤。"""
     with Session(engine) as s:
-        return s.exec(select(Observation)).all()
+        statement = select(Observation)
+        if status is not None:
+            statement = statement.where(Observation.status == status)
+        return s.exec(statement).all()
 
 
 @app.post("/observations/{obs_id}/attach-media", tags=["2·观察记录"])
@@ -175,6 +254,15 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
         media = s.get(Media, media_id)
         if not media:
             raise HTTPException(404, "素材不存在")
+        if obs.status != "uploaded":
+            raise HTTPException(
+                400,
+                detail={
+                    "message": f"状态为 {obs.status} 时不能绑定素材",
+                    "current_status": obs.status,
+                    "target_status": "uploaded",
+                },
+            )
 
         media.observation_id = obs_id
         obs.media_type = "video" if media.content_type == "video/mp4" else "photo"
@@ -182,7 +270,7 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
         s.add(obs)
         s.commit()
         return {"ok": True, "observation_id": obs_id, "media_id": media_id,
-                "media_type": obs.media_type}
+                "media_type": obs.media_type, "status": obs.status}
 
 
 @app.patch("/observations/{obs_id}", tags=["2·观察记录"])
@@ -216,6 +304,7 @@ def confirm_observation(obs_id: int):
         obs = s.get(Observation, obs_id)
         if not obs:
             raise HTTPException(404, "观察记录不存在")
+        ensure_status_transition(obs, "confirmed")
         if not obs.narrative:
             raise HTTPException(400, "还没有白描，不能定稿")
 
@@ -228,8 +317,7 @@ def confirm_observation(obs_id: int):
         if not accepted:
             raise HTTPException(400, "还没有任何已采纳的指标，不能定稿")
 
-        obs.status = "confirmed"
-        obs.confirmed_at = datetime.now()
+        transition_observation(obs, "confirmed")
         s.add(obs)
         s.commit()
         s.refresh(obs)
@@ -258,20 +346,38 @@ def generate_narrative(obs_id: int):
         if not media:
             raise HTTPException(400, "这条记录还没绑定素材，请先调用 attach-media")
 
-        result = ai_service.generate_narrative(
-            area_code=area.code if area else "",
-            media_type=obs.media_type,
-            duration_sec=media.duration_sec,
-        )
+        transition_observation(obs, "processing")
+        s.add(obs)
+        s.commit()
+        s.refresh(obs)
+
+        try:
+            result = ai_service.generate_narrative(
+                area_code=area.code if area else "",
+                media_type=obs.media_type,
+                duration_sec=media.duration_sec,
+            )
+        except Exception as exc:
+            transition_observation(
+                obs,
+                "failed",
+                failure_reason=f"生成客观白描失败：{exc}",
+            )
+            s.add(obs)
+            s.commit()
+            raise HTTPException(500, obs.failure_reason) from exc
 
         obs.narrative = result["narrative"]
         obs.narrative_ai_raw = result["narrative"]   # 留底，用来对比教师改了多少
         obs.narrative_source = "ai"
         s.add(obs)
         s.commit()
+        s.refresh(obs)
 
         return {
             "observation_id": obs_id,
+            "status": obs.status,
+            "processing_started_at": obs.processing_started_at,
             "narrative": result["narrative"],
             "is_mock": result["is_mock"],
             "engine": result["engine"],
@@ -294,6 +400,14 @@ def suggest_tags(obs_id: int):
         if not obs.narrative:
             raise HTTPException(400, "还没有白描，请先调用 narrative 接口")
 
+        if obs.status == "failed":
+            transition_observation(obs, "processing")
+            s.add(obs)
+            s.commit()
+            s.refresh(obs)
+        elif obs.status != "processing":
+            ensure_status_transition(obs, "ready_for_review")
+
         area = s.get(Area, obs.area_id)
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).first()
 
@@ -309,12 +423,22 @@ def suggest_tags(obs_id: int):
             s.delete(t)
         s.commit()
 
-        result = ai_service.suggest_indicators(
-            narrative=obs.narrative,
-            area_code=area.code if area else "",
-            age_group=obs.age_group,
-            duration_sec=media.duration_sec if media else None,
-        )
+        try:
+            result = ai_service.suggest_indicators(
+                narrative=obs.narrative,
+                area_code=area.code if area else "",
+                age_group=obs.age_group,
+                duration_sec=media.duration_sec if media else None,
+            )
+        except Exception as exc:
+            transition_observation(
+                obs,
+                "failed",
+                failure_reason=f"生成候选指标失败：{exc}",
+            )
+            s.add(obs)
+            s.commit()
+            raise HTTPException(500, obs.failure_reason) from exc
 
         saved = []
         for sug in result["suggestions"]:
@@ -330,8 +454,7 @@ def suggest_tags(obs_id: int):
                 rank_in_suggestion=sug["rank"],
             )
             s.add(tag)
-            s.commit()
-            s.refresh(tag)
+            s.flush()
             saved.append({
                 "tag_id": tag.id,
                 "indicator_code": tag.indicator_code,
@@ -343,8 +466,16 @@ def suggest_tags(obs_id: int):
                 "rank": tag.rank_in_suggestion,
             })
 
+        transition_observation(obs, "ready_for_review")
+        s.add(obs)
+        s.commit()
+        s.refresh(obs)
+
         return {
             "observation_id": obs_id,
+            "status": obs.status,
+            "processing_started_at": obs.processing_started_at,
+            "ready_at": obs.ready_at,
             "suggestions": saved,
             "quant_hits": result["quant_hits"],
             "is_mock": result["is_mock"],
@@ -441,7 +572,13 @@ def get_observation_detail(obs_id: int):
 
         return {
             "id": obs.id,
-            "状态": "已确认" if obs.status == "confirmed" else "草稿",
+            "状态": {
+                "uploaded": "已上传",
+                "processing": "AI 处理中",
+                "ready_for_review": "待教师确认",
+                "confirmed": "已确认",
+                "failed": "AI 处理失败",
+            }.get(obs.status, obs.status),
             "观察对象": child.name if child else None,
             "班级": room.name if room else None,
             "年龄段": {"small": "小班", "middle": "中班", "large": "大班"}.get(obs.age_group, obs.age_group),
@@ -465,6 +602,9 @@ def get_observation_detail(obs_id: int):
             "素材": [{"文件名": m.stored_filename, "类型": m.content_type,
                      "时长秒": m.duration_sec} for m in media],
             "确认时间": obs.confirmed_at,
+            "处理开始时间": obs.processing_started_at,
+            "待确认时间": obs.ready_at,
+            "失败原因": obs.failure_reason,
         }
 
 
