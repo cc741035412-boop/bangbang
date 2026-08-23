@@ -6,7 +6,8 @@
   → AI 推荐候选指标 → 教师采纳/否掉/自己加 → 教师补分析和措施 → 定稿 → 查看完整记录
   → 查看 AI 候选采纳率
 
-【当前 AI 部分为 DEMO MOCK】所有 mock 返回都带 is_mock=True 和 notice 提示。
+工作流 A 当前为 mock；工作流 B 可通过配置切换规则 mock 或 DeepSeek。
+所有降级输出都带 is_mock=True 和 notice 提示。
 """
 
 from pathlib import Path
@@ -25,7 +26,7 @@ from sqlmodel import Session, select
 
 from models import (
     engine, Area, ClassRoom, Child,
-    Observation, Media, ObservationTag,
+    Observation, Media, AIRun, ObservationTag,
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
 from config import DEFAULT_CLASSROOM_ID, UPLOAD_DIR
@@ -35,7 +36,7 @@ import ai_service
 app = FastAPI(
     title="帮帮师记 API",
     version="0.2",
-    description="幼儿园教师素材沉淀与观察记录生成。AI 部分当前为演示 mock。",
+    description="幼儿园教师素材沉淀与观察记录生成。工作流 B 支持 mock / DeepSeek 切换。",
 )
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -614,7 +615,7 @@ def confirm_observation(obs_id: int):
 @app.post(
     "/observations/{obs_id}/narrative",
     response_model=NarrativeGenerationResponse,
-    tags=["3·AI（mock）"],
+    tags=["3·AI"],
 )
 def generate_narrative(obs_id: int):
     """
@@ -674,7 +675,7 @@ def generate_narrative(obs_id: int):
         }
 
 
-@app.post("/observations/{obs_id}/suggest-tags", tags=["3·AI（mock）"])
+@app.post("/observations/{obs_id}/suggest-tags", tags=["3·AI"])
 def suggest_tags(obs_id: int):
     """
     【AI 工作流 B】根据白描 + 区域 + 年龄段，推荐 2-3 个候选指标。
@@ -710,6 +711,10 @@ def suggest_tags(obs_id: int):
         if existing_candidates:
             system_tags = [t for t in existing_candidates if t.source == "system_determined"]
             ai_tags = [t for t in existing_candidates if t.source == "ai_suggested"]
+            linked_run = next(
+                (s.get(AIRun, tag.ai_run_id) for tag in existing_candidates if tag.ai_run_id),
+                None,
+            )
             return {
                 "observation_id": obs_id,
                 "status": obs.status,
@@ -723,6 +728,7 @@ def suggest_tags(obs_id: int):
                     "level_desc": level_desc(tag.indicator_code, tag.level),
                     "confidence": tag.confidence,
                     "reason": tag.ai_reason,
+                    "evidence_based": (tag.confidence or 0) > 0.42,
                     "rank": tag.rank_in_suggestion,
                 } for tag in ai_tags],
                 "quant_hits": [{
@@ -735,8 +741,8 @@ def suggest_tags(obs_id: int):
                     "deterministic": True,
                     "accepted": tag.accepted,
                 } for tag in system_tags],
-                "is_mock": True,
-                "engine": "persisted-candidates",
+                "is_mock": linked_run.is_mock if linked_run else True,
+                "engine": linked_run.model if linked_run else "persisted-candidates",
                 "notice": "返回已保存的候选指标，未重复生成。",
                 "hint": "quant_hits 是纯计算命中（如视频时长），不走模型，界面上应标为「系统判定」而非「AI 建议」。",
             }
@@ -757,6 +763,7 @@ def suggest_tags(obs_id: int):
             result = ai_service.suggest_indicators(
                 narrative=obs.narrative,
                 area_code=area.code if area else "",
+                area_name=area.name if area else "",
                 age_group=obs.age_group,
                 duration_sec=media.duration_sec if media else None,
             )
@@ -770,10 +777,15 @@ def suggest_tags(obs_id: int):
             s.commit()
             raise HTTPException(500, obs.failure_reason) from exc
 
+        run = AIRun(observation_id=obs_id, **result["ai_run"])
+        s.add(run)
+        s.flush()
+
         saved_quant_hits = []
         for hit in result["quant_hits"]:
             tag = ObservationTag(
                 observation_id=obs_id,
+                ai_run_id=run.id,
                 indicator_code=hit["indicator_code"],
                 indicator_name=hit["indicator_name"],
                 level=hit["level"],
@@ -798,6 +810,7 @@ def suggest_tags(obs_id: int):
         for sug in result["suggestions"]:
             tag = ObservationTag(
                 observation_id=obs_id,
+                ai_run_id=run.id,
                 indicator_code=sug["indicator_code"],
                 indicator_name=sug["indicator_name"],
                 level=sug["level"],
@@ -817,6 +830,7 @@ def suggest_tags(obs_id: int):
                 "level_desc": sug["level_desc"],
                 "confidence": tag.confidence,
                 "reason": tag.ai_reason,
+                "evidence_based": sug["evidence_based"],
                 "rank": tag.rank_in_suggestion,
             })
 
@@ -836,6 +850,7 @@ def suggest_tags(obs_id: int):
             "is_mock": result["is_mock"],
             "engine": result["engine"],
             "notice": result["notice"],
+            "ai_run_id": run.id,
             "hint": "quant_hits 是纯计算命中（如视频时长），不走模型，界面上应标为「系统判定」而非「AI 建议」。",
         }
 
@@ -988,5 +1003,5 @@ def ai_quality():
         "教师自己补的": len(teacher_added),
         "漏检率": round(len(teacher_added) / len(all_accepted), 3) if all_accepted else None,
         "分维度采纳率": by_dim,
-        "说明": "当前 AI 为 demo mock，这些数字只用于验证埋点链路是否通，不代表真实模型效果。",
+        "说明": "指标可能混合 mock 与真实模型结果；可通过 ai_run 区分模型、prompt 版本与参数。",
     }

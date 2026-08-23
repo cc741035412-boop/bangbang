@@ -1,17 +1,29 @@
-"""
-AI 服务层
+"""AI 服务层：工作流 A 保持 mock，工作流 B 可切换 DeepSeek 或规则降级。"""
 
-【重要】当前是 DEMO MOCK，没有调用任何真实大模型。
-所有 mock 输出都带 is_mock=True 标记，前端和演示时必须显示出来。
-
-以后接真实 AI（Dify / 大模型 API）时，只需要替换这个文件里两个函数的内部实现，
-main.py 一行都不用改。接口契约在下面的 docstring 里写死了。
-"""
-
+import json
 import re
+from time import perf_counter
 from typing import List, Dict, Optional
 
+import httpx
+
+from config import AI_MODE, DEEPSEEK_API_KEY, DEEPSEEK_API_URL
 from indicators import INDICATORS, AREA_PRIOR, DEFAULT_PRIOR
+from prompts.workflow_b_v1 import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    render_full_prompt,
+    render_user_prompt,
+)
+from time_utils import utc_now
+
+
+DEEPSEEK_MODEL = "deepseek-chat"
+# DeepSeek 官方对“数据抽取/数据分析”类任务的推荐值。
+DEEPSEEK_TEMPERATURE = 1.0
+DEEPSEEK_TIMEOUT_SECONDS = 30.0
+DEEPSEEK_MAX_ATTEMPTS = 2  # 首次失败后重试 1 次
+PRIOR_ONLY_PREFIX = "仅依据区域先验推测，请教师重点核对"
 
 
 # ============================================================
@@ -116,7 +128,7 @@ def _check_quant_rule(rule: Optional[Dict], duration_sec: Optional[int]) -> bool
     return False
 
 
-def suggest_indicators(
+def _suggest_indicators_mock(
     narrative: str,
     area_code: str,
     age_group: str,
@@ -141,8 +153,7 @@ def suggest_indicators(
       置信度低于 0.40 的不返回 —— 宁可少给，也不硬猜。
       判不了就返回空数组，这是被允许的（弃权比乱猜好）。
 
-    真实实现时替换这里：调 Dify 工作流 B（RAG 检索指标知识库），
-    但保留区域先验收敛和 quant_rule 纯计算这两步 —— 它们不该交给模型。
+    该函数同时作为 DeepSeek 不可用时的稳定降级路径。
     """
     prior = AREA_PRIOR.get(area_code, DEFAULT_PRIOR)
 
@@ -235,3 +246,338 @@ def _build_reason(name: str, best: Dict, area_code: str) -> str:
     """拼一句人能看懂的推荐理由 —— 让教师能快速判断要不要采纳"""
     lv = {1: "初阶", 2: "中阶", 3: "高阶"}[best["level"]]
     return f"白描中出现 {best['pos']} 处与「{name}·{lv}」相符的行为描述，且该区域高频触发此要点。"
+
+
+def _is_dimension_2(code: str, item: Dict) -> bool:
+    """维度 2（社会情感）属于伦理硬排除项，不受配置影响。"""
+    return code.split(".", 1)[0] == "2" or item.get("dimension") == "社会情感"
+
+
+def _model_indicator_catalog() -> List[Dict]:
+    """给模型全部可判定指标；区域先验绝不用于过滤候选集。"""
+    catalog = []
+    for code, item in INDICATORS.items():
+        if _is_dimension_2(code, item):
+            continue
+        levels = []
+        for level in (1, 2, 3):
+            detail = item["levels"][level]
+            levels.append({
+                "level": level,
+                "desc": detail["desc"],
+                "keywords": detail["keywords"],
+                "negative": detail["negative"],
+            })
+        catalog.append({
+            "indicator_code": code,
+            "indicator_name": item["name"],
+            "dimension": item["dimension"],
+            "levels": levels,
+        })
+    return catalog
+
+
+def _extract_quoted_fragments(reason: str) -> List[str]:
+    patterns = [
+        r"“([^”]+)”",
+        r'"([^"]+)"',
+        r"‘([^’]+)’",
+        r"'([^']+)'",
+    ]
+    fragments = []
+    for pattern in patterns:
+        fragments.extend(re.findall(pattern, reason))
+    return [fragment.strip() for fragment in fragments if fragment.strip()]
+
+
+def _loosely_contains(narrative: str, fragment: str) -> bool:
+    """只忽略空白差异，不允许模型改写或拼接原文。"""
+    normalize = lambda value: re.sub(r"\s+", "", value)  # noqa: E731
+    return bool(fragment) and normalize(fragment) in normalize(narrative)
+
+
+def _validate_model_suggestions(
+    payload: Dict,
+    *,
+    narrative: str,
+    top_n: int,
+) -> tuple:
+    """不信任模型输出：校验白名单、层级、置信度与原文引用。"""
+    raw_suggestions = payload.get("suggestions")
+    if not isinstance(raw_suggestions, list):
+        raise ValueError("模型 JSON 缺少 suggestions 数组")
+
+    allowed = {
+        code: item
+        for code, item in INDICATORS.items()
+        if not _is_dimension_2(code, item)
+    }
+    valid = []
+    warnings = []
+
+    for index, raw in enumerate(raw_suggestions, start=1):
+        if not isinstance(raw, dict):
+            warnings.append(f"第 {index} 条不是 JSON object，已丢弃")
+            continue
+
+        code = raw.get("indicator_code")
+        if code not in allowed:
+            warnings.append(f"第 {index} 条指标 {code!r} 不在允许清单中，已丢弃")
+            continue
+
+        level = raw.get("level")
+        if isinstance(level, bool) or level not in {1, 2, 3}:
+            warnings.append(f"第 {index} 条指标 {code} 的 level 非法，已丢弃")
+            continue
+
+        confidence = raw.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            warnings.append(f"第 {index} 条指标 {code} 的 confidence 非数字，已丢弃")
+            continue
+        confidence = float(confidence)
+        if not 0 <= confidence <= 1:
+            warnings.append(f"第 {index} 条指标 {code} 的 confidence 超出 0–1，已丢弃")
+            continue
+
+        reason = raw.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            warnings.append(f"第 {index} 条指标 {code} 缺少 reason，已丢弃")
+            continue
+        reason = reason.strip()
+
+        fragments = _extract_quoted_fragments(reason)
+        evidence_based = any(
+            _loosely_contains(narrative, fragment) for fragment in fragments
+        )
+        if not evidence_based:
+            if raw.get("evidence_based") is True:
+                warnings.append(
+                    f"第 {index} 条指标 {code} 的原文引用无法在白描中找到，"
+                    "已降为区域先验"
+                )
+            confidence = min(confidence, 0.42)
+            if not reason.startswith(PRIOR_ONLY_PREFIX):
+                reason = f"{PRIOR_ONLY_PREFIX}：{reason}"
+
+        item = allowed[code]
+        valid.append({
+            "indicator_code": code,
+            "indicator_name": item["name"],
+            "level": level,
+            "level_desc": item["levels"][level]["desc"],
+            "confidence": round(confidence, 3),
+            "reason": reason,
+            "evidence_based": evidence_based,
+            "deterministic": False,
+        })
+
+    valid.sort(key=lambda item: item["confidence"], reverse=True)
+    valid = valid[:top_n]
+    for rank, item in enumerate(valid, start=1):
+        item["rank"] = rank
+    return valid, warnings
+
+
+def _safe_response_json(response: httpx.Response) -> Dict:
+    try:
+        data = response.json()
+        return data if isinstance(data, dict) else {"data": data}
+    except (ValueError, json.JSONDecodeError):
+        return {
+            "http_status": response.status_code,
+            "body": response.text[:2000],
+        }
+
+
+def _mock_run_metadata(result: Dict, started_at, elapsed_ms: int) -> Dict:
+    return {
+        "workflow": "indicator_suggestion",
+        "provider": "mock",
+        "model": "demo-mock-rule-v1",
+        "prompt_version": PROMPT_VERSION,
+        "status": "completed",
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "latency_ms": elapsed_ms,
+        "response_raw": {
+            "suggestions": result["suggestions"],
+            "quant_hits": result["quant_hits"],
+        },
+        "error_reason": None,
+        "is_mock": True,
+        "prompt_rendered": "mock 模式未向外部模型发送 prompt",
+        "token_usage": None,
+        "temperature": None,
+    }
+
+
+def _deepseek_or_fallback(
+    *,
+    narrative: str,
+    area_code: str,
+    area_name: str,
+    age_group: str,
+    duration_sec: Optional[int],
+    top_n: int,
+) -> Dict:
+    started_at = utc_now()
+    started_clock = perf_counter()
+    catalog = _model_indicator_catalog()
+    allowed_codes = {item["indicator_code"] for item in catalog}
+    prior = AREA_PRIOR.get(area_code, DEFAULT_PRIOR)
+    prior = {code: weight for code, weight in prior.items() if code in allowed_codes}
+    user_prompt = render_user_prompt(
+        narrative=narrative,
+        area_name=area_name,
+        age_group=age_group,
+        indicators=catalog,
+        area_prior=prior,
+        top_n=top_n,
+    )
+    prompt_rendered = render_full_prompt(SYSTEM_PROMPT, user_prompt)
+    request_body = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": DEEPSEEK_TEMPERATURE,
+        "response_format": {"type": "json_object"},
+        "max_tokens": 1600,
+        "stream": False,
+    }
+
+    errors = []
+    last_raw_response = None
+    if not DEEPSEEK_API_KEY:
+        errors.append("DEEPSEEK_API_KEY 未配置")
+    else:
+        for attempt in range(1, DEEPSEEK_MAX_ATTEMPTS + 1):
+            try:
+                response = httpx.post(
+                    DEEPSEEK_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_body,
+                    timeout=DEEPSEEK_TIMEOUT_SECONDS,
+                )
+                last_raw_response = _safe_response_json(response)
+                response.raise_for_status()
+                choices = last_raw_response.get("choices") or []
+                content = choices[0]["message"]["content"] if choices else ""
+                if not content:
+                    raise ValueError("模型返回了空 content")
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    raise ValueError("模型返回的 JSON 顶层不是 object")
+                suggestions, warnings = _validate_model_suggestions(
+                    parsed,
+                    narrative=narrative,
+                    top_n=top_n,
+                )
+                if not suggestions:
+                    raise ValueError("模型结果校验后一条候选都不剩")
+
+                baseline = _suggest_indicators_mock(
+                    narrative=narrative,
+                    area_code=area_code,
+                    age_group=age_group,
+                    duration_sec=duration_sec,
+                    top_n=top_n,
+                )
+                baseline.update({
+                    "suggestions": suggestions,
+                    "is_mock": False,
+                    "engine": DEEPSEEK_MODEL,
+                    "notice": "候选指标由 DeepSeek 生成，请教师逐条核对。",
+                    "evidence_based_count": sum(
+                        1 for item in suggestions if item["evidence_based"]
+                    ),
+                    "ai_run": {
+                        "workflow": "indicator_suggestion",
+                        "provider": "deepseek",
+                        "model": DEEPSEEK_MODEL,
+                        "prompt_version": PROMPT_VERSION,
+                        "status": "completed",
+                        "started_at": started_at,
+                        "completed_at": utc_now(),
+                        "latency_ms": round((perf_counter() - started_clock) * 1000),
+                        "response_raw": last_raw_response,
+                        "error_reason": "; ".join(warnings) or None,
+                        "is_mock": False,
+                        "prompt_rendered": prompt_rendered,
+                        "token_usage": last_raw_response.get("usage"),
+                        "temperature": DEEPSEEK_TEMPERATURE,
+                    },
+                })
+                return baseline
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                errors.append(f"第 {attempt} 次调用失败：{exc}")
+
+    fallback = _suggest_indicators_mock(
+        narrative=narrative,
+        area_code=area_code,
+        age_group=age_group,
+        duration_sec=duration_sec,
+        top_n=top_n,
+    )
+    fallback.update({
+        "notice": "⚠️ DeepSeek 暂时不可用，已自动使用演示规则生成候选指标。",
+        "ai_run": {
+            "workflow": "indicator_suggestion",
+            "provider": "deepseek",
+            "model": DEEPSEEK_MODEL,
+            "prompt_version": PROMPT_VERSION,
+            "status": "failed",
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "latency_ms": round((perf_counter() - started_clock) * 1000),
+            "response_raw": last_raw_response,
+            "error_reason": "; ".join(errors),
+            "is_mock": True,
+            "prompt_rendered": prompt_rendered,
+            "token_usage": (
+                last_raw_response.get("usage") if last_raw_response else None
+            ),
+            "temperature": DEEPSEEK_TEMPERATURE,
+        },
+    })
+    return fallback
+
+
+def suggest_indicators(
+    narrative: str,
+    area_code: str,
+    age_group: str,
+    duration_sec: Optional[int] = None,
+    top_n: int = 3,
+    area_name: Optional[str] = None,
+) -> Dict:
+    """按配置执行工作流 B；DeepSeek 失败时永远降级而不向上抛错。"""
+    if AI_MODE == "deepseek":
+        return _deepseek_or_fallback(
+            narrative=narrative,
+            area_code=area_code,
+            area_name=area_name or area_code,
+            age_group=age_group,
+            duration_sec=duration_sec,
+            top_n=top_n,
+        )
+
+    started_at = utc_now()
+    started_clock = perf_counter()
+    result = _suggest_indicators_mock(
+        narrative=narrative,
+        area_code=area_code,
+        age_group=age_group,
+        duration_sec=duration_sec,
+        top_n=top_n,
+    )
+    result["ai_run"] = _mock_run_metadata(
+        result,
+        started_at,
+        round((perf_counter() - started_clock) * 1000),
+    )
+    return result

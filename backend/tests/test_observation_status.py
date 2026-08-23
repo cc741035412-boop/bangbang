@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import unittest
@@ -6,13 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import main
-from models import Area, Child, ClassRoom, Observation
+from models import AIRun, Area, Child, ClassRoom, Observation, ObservationTag
 
 
 class ObservationStatusFlowTest(unittest.TestCase):
@@ -104,6 +106,11 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertIsNotNone(suggestions.json()["ready_at"])
         self.assertTrue(suggestions.json()["suggestions"])
         self.assertTrue(suggestions.json()["quant_hits"])
+        with Session(main.engine) as session:
+            mock_run = session.get(AIRun, suggestions.json()["ai_run_id"])
+            self.assertEqual(mock_run.status, "completed")
+            self.assertTrue(mock_run.is_mock)
+            self.assertEqual(mock_run.provider, "mock")
 
         detail_with_tags = self.client.get(f"/observations/{observation_id}").json()
         system_tags = [
@@ -451,6 +458,141 @@ class ObservationStatusFlowTest(unittest.TestCase):
         refreshed_media = self.client.get("/media").json()
         retried_media = next(item for item in refreshed_media if item["id"] == failed_media["id"])
         self.assertIsNone(retried_media["thumbnail_failure_reason"])
+
+    def test_deepseek_suggestions_are_validated_audited_and_linked(self):
+        observation_id = self.create_bound_observation()
+        self.client.post(f"/observations/{observation_id}/narrative")
+        model_content = {
+            "suggestions": [
+                {
+                    "indicator_code": "4.4",
+                    "indicator_name": "模型不能决定名称",
+                    "level": 2,
+                    "level_desc": "模型不能决定描述",
+                    "confidence": 0.86,
+                    "reason": "白描原文写道：“调整了间距后继续摆放”",
+                    "evidence_based": True,
+                    "rank": 9,
+                },
+                {
+                    "indicator_code": "1.2",
+                    "indicator_name": "身体探索方式",
+                    "level": 3,
+                    "level_desc": "无效描述",
+                    "confidence": 0.8,
+                    "reason": "白描原文写道：“白描中不存在的片段”",
+                    "evidence_based": True,
+                    "rank": 1,
+                },
+                {
+                    "indicator_code": "2.1",
+                    "indicator_name": "伦理禁区",
+                    "level": 1,
+                    "level_desc": "不应出现",
+                    "confidence": 0.9,
+                    "reason": "白描原文写道：“幼儿A坐在地垫上”",
+                    "evidence_based": True,
+                    "rank": 2,
+                },
+            ]
+        }
+        raw_response = {
+            "id": "test-completion",
+            "choices": [{
+                "message": {"content": json.dumps(model_content, ensure_ascii=False)}
+            }],
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 180,
+                "total_tokens": 1380,
+            },
+        }
+        response = httpx.Response(
+            200,
+            json=raw_response,
+            request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+        )
+
+        with (
+            patch.object(main.ai_service, "AI_MODE", "deepseek"),
+            patch.object(main.ai_service, "DEEPSEEK_API_KEY", "test-key"),
+            patch.object(main.ai_service.httpx, "post", return_value=response) as post,
+        ):
+            generated = self.client.post(
+                f"/observations/{observation_id}/suggest-tags"
+            )
+
+        self.assertEqual(generated.status_code, 200)
+        body = generated.json()
+        self.assertFalse(body["is_mock"])
+        self.assertEqual([item["indicator_code"] for item in body["suggestions"]], ["4.4", "1.2"])
+        self.assertTrue(body["suggestions"][0]["evidence_based"])
+        self.assertFalse(body["suggestions"][1]["evidence_based"])
+        self.assertEqual(body["suggestions"][1]["confidence"], 0.42)
+
+        request_body = post.call_args.kwargs["json"]
+        self.assertEqual(request_body["model"], "deepseek-chat")
+        self.assertEqual(request_body["temperature"], 1.0)
+        self.assertEqual(request_body["response_format"], {"type": "json_object"})
+        rendered = request_body["messages"][1]["content"]
+        self.assertIn('"indicator_code": "4.4"', rendered)
+        self.assertNotIn('"indicator_code": "2.1"', rendered)
+
+        with Session(main.engine) as session:
+            run = session.get(AIRun, body["ai_run_id"])
+            self.assertEqual(run.status, "completed")
+            self.assertEqual(run.prompt_version, "wf-b-v1")
+            self.assertEqual(run.temperature, 1.0)
+            self.assertEqual(run.token_usage["total_tokens"], 1380)
+            self.assertIn("2.1", run.error_reason)
+            self.assertIn("原文引用无法", run.error_reason)
+            tags = session.exec(
+                select(ObservationTag).where(
+                    ObservationTag.observation_id == observation_id
+                )
+            ).all()
+            self.assertTrue(tags)
+            self.assertTrue(all(tag.ai_run_id == run.id for tag in tags))
+
+    def test_deepseek_auth_failure_retries_once_and_falls_back(self):
+        observation_id = self.create_bound_observation()
+        self.client.post(f"/observations/{observation_id}/narrative")
+        unauthorized = httpx.Response(
+            401,
+            json={"error": {"message": "Authentication Fails"}},
+            request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+        )
+
+        with (
+            patch.object(main.ai_service, "AI_MODE", "deepseek"),
+            patch.object(main.ai_service, "DEEPSEEK_API_KEY", "wrong-key"),
+            patch.object(
+                main.ai_service.httpx,
+                "post",
+                return_value=unauthorized,
+            ) as post,
+        ):
+            generated = self.client.post(
+                f"/observations/{observation_id}/suggest-tags"
+            )
+
+        self.assertEqual(generated.status_code, 200)
+        body = generated.json()
+        self.assertTrue(body["is_mock"])
+        self.assertEqual(post.call_count, 2)
+        self.assertTrue(body["suggestions"])
+
+        with Session(main.engine) as session:
+            run = session.get(AIRun, body["ai_run_id"])
+            self.assertEqual(run.status, "failed")
+            self.assertTrue(run.is_mock)
+            self.assertIn("401", run.error_reason)
+            tags = session.exec(
+                select(ObservationTag).where(
+                    ObservationTag.observation_id == observation_id
+                )
+            ).all()
+            self.assertTrue(all(tag.ai_run_id == run.id for tag in tags))
 
 
 if __name__ == "__main__":

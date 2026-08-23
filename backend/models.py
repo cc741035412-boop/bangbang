@@ -2,7 +2,7 @@ from typing import Dict, Optional
 from datetime import datetime
 from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field, create_engine
-from config import DATABASE_PATH
+from config import DATABASE_PATH, SQL_ECHO
 from time_utils import UTCDateTime, utc_now
 
 
@@ -122,6 +122,7 @@ class AIRun(SQLModel, table=True):
         default=None,
         sa_column=Column(JSON, nullable=True),
     )
+    temperature: Optional[float] = None
 
 
 # ========== 表7：指标标注（本项目最重要的一张表）==========
@@ -152,7 +153,7 @@ class ObservationTag(SQLModel, table=True):
 
 
 # ========== 数据库连接 ==========
-engine = create_engine(f"sqlite:///{DATABASE_PATH}", echo=True)
+engine = create_engine(f"sqlite:///{DATABASE_PATH}", echo=SQL_ECHO)
 
 
 def init_db():

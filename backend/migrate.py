@@ -34,6 +34,10 @@ NEW_OBSERVATIONTAG_COLUMNS = [
     ("ai_run_id", "INTEGER REFERENCES ai_run(id)"),
 ]
 
+NEW_AI_RUN_COLUMNS = [
+    ("temperature", "FLOAT"),
+]
+
 
 def backup_database():
     """任何结构或数据迁移前先创建带时间戳的数据库副本。"""
@@ -125,6 +129,28 @@ def add_missing_observationtag_columns():
         print("③ observationtag 表字段已齐全，无需改动")
 
 
+def add_missing_ai_run_columns():
+    """给 AI 调用审计表补充后续实验参数。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    existing = {row[1] for row in cur.execute("PRAGMA table_info(ai_run)")}
+
+    added = []
+    for col_name, col_type in NEW_AI_RUN_COLUMNS:
+        if col_name in existing:
+            continue
+        cur.execute(f"ALTER TABLE ai_run ADD COLUMN {col_name} {col_type}")
+        added.append(col_name)
+
+    conn.commit()
+    conn.close()
+
+    if added:
+        print(f"④ ai_run 表新增字段：{'、'.join(added)}")
+    else:
+        print("④ ai_run 表字段已齐全，无需改动")
+
+
 def migrate_status_values():
     """把旧状态映射到新状态；已迁移数据重复运行不会变化。"""
     conn = sqlite3.connect(DB_FILE)
@@ -135,7 +161,7 @@ def migrate_status_values():
     migrated = cur.rowcount
     conn.commit()
     conn.close()
-    print(f"④ 状态迁移：draft → ready_for_review，共 {migrated} 条")
+    print(f"⑤ 状态迁移：draft → ready_for_review，共 {migrated} 条")
 
 
 def rebuild_observation_for_quick_capture():
@@ -150,7 +176,7 @@ def rebuild_observation_for_quick_capture():
     )
     if already_migrated:
         conn.close()
-        print("⑤ observation 可空约束已符合现场沉淀模型，无需重建")
+        print("⑥ observation 可空约束已符合现场沉淀模型，无需重建")
         return
 
     column_names = [
@@ -209,7 +235,7 @@ def rebuild_observation_for_quick_capture():
     conn.close()
     if foreign_key_errors:
         raise RuntimeError(f"迁移后外键检查失败：{foreign_key_errors}")
-    print("⑤ observation 已重建：child_id、media_type 改为可空，原数据已复制")
+    print("⑥ observation 已重建：child_id、media_type 改为可空，原数据已复制")
 
 
 def show_result():
@@ -238,6 +264,7 @@ if __name__ == "__main__":
     create_new_tables()
     add_missing_columns()
     add_missing_observationtag_columns()
+    add_missing_ai_run_columns()
     migrate_status_values()
     rebuild_observation_for_quick_capture()
     observation_summary("迁移后")

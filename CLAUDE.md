@@ -42,7 +42,7 @@
 ## 3. 当前技术
 
 - 后端：Python 3.9、FastAPI、SQLModel、SQLite、Uvicorn
-- AI：当前为 demo mock；未来接入真实模型时保持现有接口契约
+- AI：工作流 A 当前为 demo mock；工作流 B 可通过 `BANGBANG_AI_MODE=mock|deepseek` 切换，DeepSeek 失败自动降级到规则 mock
 - 前端：React 19、TypeScript 5、Vite 8、React Router 7（声明式模式）、TanStack Query 5、Tailwind CSS 4
 
 ## 4. AI 与数据规则
