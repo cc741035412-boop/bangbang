@@ -9,7 +9,7 @@ import httpx
 
 from config import AI_MODE, DEEPSEEK_API_KEY, DEEPSEEK_API_URL
 from indicators import INDICATORS, AREA_PRIOR, DEFAULT_PRIOR
-from prompts.workflow_b_v1 import (
+from prompts.workflow_b_v2 import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     render_full_prompt,
@@ -185,6 +185,8 @@ def _suggest_indicators_mock(
         chosen = None
         for level in (3, 2, 1):
             detail = item["levels"][level]
+            if detail["quant_rule"] is not None:
+                continue
             pos = _hit_keywords(narrative, detail["keywords"])
             neg = _hit_keywords(narrative, detail["negative"])
             if pos > 0 and neg == 0:
@@ -208,6 +210,9 @@ def _suggest_indicators_mock(
             })
         else:
             # 白描里找不到任何层级信号 —— 只能靠区域先验猜，置信度压低并明说
+            # 初阶若由 quant_rule 管理，则不能把“数据缺失”降级成 AI 猜测。
+            if item["levels"][1]["quant_rule"] is not None:
+                continue
             conf = round(min(0.42, weight * 0.45), 3)
             if conf >= 0.35:
                 prior_only.append({
@@ -253,28 +258,39 @@ def _is_dimension_2(code: str, item: Dict) -> bool:
     return code.split(".", 1)[0] == "2" or item.get("dimension") == "社会情感"
 
 
-def _model_indicator_catalog() -> List[Dict]:
-    """给模型全部可判定指标；区域先验绝不用于过滤候选集。"""
+def _model_indicator_catalog() -> tuple:
+    """给模型全部语义层级；quant_rule 层级只归系统判定。"""
     catalog = []
+    excluded_quant_levels = []
     for code, item in INDICATORS.items():
         if _is_dimension_2(code, item):
             continue
         levels = []
         for level in (1, 2, 3):
             detail = item["levels"][level]
+            if detail["quant_rule"] is not None:
+                excluded_quant_levels.append({
+                    "indicator_code": code,
+                    "indicator_name": item["name"],
+                    "level": level,
+                    "level_desc": detail["desc"],
+                    "quant_rule": detail["quant_rule"],
+                })
+                continue
             levels.append({
                 "level": level,
                 "desc": detail["desc"],
                 "keywords": detail["keywords"],
                 "negative": detail["negative"],
             })
-        catalog.append({
-            "indicator_code": code,
-            "indicator_name": item["name"],
-            "dimension": item["dimension"],
-            "levels": levels,
-        })
-    return catalog
+        if levels:
+            catalog.append({
+                "indicator_code": code,
+                "indicator_name": item["name"],
+                "dimension": item["dimension"],
+                "levels": levels,
+            })
+    return catalog, excluded_quant_levels
 
 
 def _extract_quoted_fragments(reason: str) -> List[str]:
@@ -328,6 +344,13 @@ def _validate_model_suggestions(
         level = raw.get("level")
         if isinstance(level, bool) or level not in {1, 2, 3}:
             warnings.append(f"第 {index} 条指标 {code} 的 level 非法，已丢弃")
+            continue
+
+        if allowed[code]["levels"][level]["quant_rule"] is not None:
+            warnings.append(
+                f"第 {index} 条指标 {code}·层级 {level} 由 quant_rule 管理，"
+                "不得作为 AI 建议，已丢弃"
+            )
             continue
 
         confidence = raw.get("confidence")
@@ -431,7 +454,7 @@ def _deepseek_or_fallback(
 ) -> Dict:
     started_at = utc_now()
     started_clock = perf_counter()
-    catalog = _model_indicator_catalog()
+    catalog, excluded_quant_levels = _model_indicator_catalog()
     allowed_codes = {item["indicator_code"] for item in catalog}
     prior = AREA_PRIOR.get(area_code, DEFAULT_PRIOR)
     prior = {code: weight for code, weight in prior.items() if code in allowed_codes}
@@ -440,6 +463,7 @@ def _deepseek_or_fallback(
         area_name=area_name,
         age_group=age_group,
         indicators=catalog,
+        excluded_quant_levels=excluded_quant_levels,
         area_prior=prior,
         top_n=top_n,
     )

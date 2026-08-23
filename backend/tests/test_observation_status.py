@@ -488,6 +488,16 @@ class ObservationStatusFlowTest(unittest.TestCase):
                     "rank": 1,
                 },
                 {
+                    "indicator_code": "1.1",
+                    "indicator_name": "身体行为参与度",
+                    "level": 2,
+                    "level_desc": "模型越过系统判定边界",
+                    "confidence": 0.88,
+                    "reason": "白描原文写道：“幼儿A坐在地垫上”",
+                    "evidence_based": True,
+                    "rank": 2,
+                },
+                {
                     "indicator_code": "2.1",
                     "indicator_name": "伦理禁区",
                     "level": 1,
@@ -529,6 +539,11 @@ class ObservationStatusFlowTest(unittest.TestCase):
         body = generated.json()
         self.assertFalse(body["is_mock"])
         self.assertEqual([item["indicator_code"] for item in body["suggestions"]], ["4.4", "1.2"])
+        self.assertNotIn("1.1", [item["indicator_code"] for item in body["suggestions"]])
+        self.assertIn(
+            ("1.1", 2),
+            {(item["indicator_code"], item["level"]) for item in body["quant_hits"]},
+        )
         self.assertTrue(body["suggestions"][0]["evidence_based"])
         self.assertEqual(
             body["suggestions"][0]["reason"],
@@ -544,14 +559,30 @@ class ObservationStatusFlowTest(unittest.TestCase):
         rendered = request_body["messages"][1]["content"]
         self.assertIn('"indicator_code": "4.4"', rendered)
         self.assertNotIn('"indicator_code": "2.1"', rendered)
+        self.assertIn("由系统按客观数据计算，不在你的判定范围内", rendered)
+
+        catalog, excluded = main.ai_service._model_indicator_catalog()
+        indicator_11 = next(
+            item for item in catalog if item["indicator_code"] == "1.1"
+        )
+        self.assertEqual([level["level"] for level in indicator_11["levels"]], [3])
+        self.assertEqual(
+            {
+                (item["indicator_code"], item["level"])
+                for item in excluded
+                if item["indicator_code"] == "1.1"
+            },
+            {("1.1", 1), ("1.1", 2)},
+        )
 
         with Session(main.engine) as session:
             run = session.get(AIRun, body["ai_run_id"])
             self.assertEqual(run.status, "completed")
-            self.assertEqual(run.prompt_version, "wf-b-v1")
+            self.assertEqual(run.prompt_version, "wf-b-v2")
             self.assertEqual(run.temperature, 1.0)
             self.assertEqual(run.token_usage["total_tokens"], 1380)
             self.assertIn("2.1", run.error_reason)
+            self.assertIn("quant_rule", run.error_reason)
             self.assertIn("原文引用无法", run.error_reason)
             tags = session.exec(
                 select(ObservationTag).where(
