@@ -6,7 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import SQLModel
-from config import DATABASE_PATH
+from config import (
+    DATABASE_PATH,
+    DEFAULT_CLASSROOM_ID,
+    DEFAULT_TEACHER_ID,
+    DEFAULT_TEACHER_NAME,
+)
 from models import engine  # noqa: F401  导入 models 才能让 SQLModel 知道有哪些表
 
 DB_FILE = DATABASE_PATH
@@ -28,6 +33,14 @@ NEW_OBSERVATION_COLUMNS = [
     ("ready_at",              "DATETIME"),
     ("confirmed_at",     "DATETIME"),
     ("failure_reason",        "TEXT"),
+    ("observer_id", "INTEGER REFERENCES teacher(id)"),
+    ("location", "TEXT"),
+    ("background_note", "TEXT"),
+]
+
+NEW_CHILD_COLUMNS = [
+    ("birth_date", "DATE"),
+    ("gender", "VARCHAR(1)"),
 ]
 
 NEW_OBSERVATIONTAG_COLUMNS = [
@@ -107,6 +120,63 @@ def add_missing_columns():
         print("② observation 表字段已齐全，无需改动")
 
 
+def add_missing_child_columns():
+    """给 child 表补出生日期和性别。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    existing = {row[1] for row in cur.execute("PRAGMA table_info(child)")}
+
+    added = []
+    for col_name, col_type in NEW_CHILD_COLUMNS:
+        if col_name in existing:
+            continue
+        cur.execute(f"ALTER TABLE child ADD COLUMN {col_name} {col_type}")
+        added.append(col_name)
+
+    conn.commit()
+    conn.close()
+    if added:
+        print(f"③ child 表新增字段：{'、'.join(added)}")
+    else:
+        print("③ child 表字段已齐全，无需改动")
+
+
+def seed_default_teacher_and_backfill_observer():
+    """创建 MVP 默认教师，并让历史记录都有可导出的观察者。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO teacher (id, name, classroom_id) VALUES (?, ?, ?)",
+        (DEFAULT_TEACHER_ID, DEFAULT_TEACHER_NAME, DEFAULT_CLASSROOM_ID),
+    )
+    cur.execute(
+        "UPDATE observation SET observer_id = ? WHERE observer_id IS NULL",
+        (DEFAULT_TEACHER_ID,),
+    )
+    updated = cur.rowcount
+    conn.commit()
+    conn.close()
+    print(f"④ 默认教师已就绪；历史 observation 回填观察者 {updated} 条")
+
+
+def migrate_observation_children():
+    """把历史 child_id 迁入多人关联表；可重复运行且不制造重复行。"""
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO observation_child
+            (observation_id, child_id, is_primary)
+        SELECT id, child_id, 1
+        FROM observation
+        WHERE child_id IS NOT NULL
+    """)
+    inserted = cur.rowcount
+    total = cur.execute("SELECT COUNT(*) FROM observation_child").fetchone()[0]
+    conn.commit()
+    conn.close()
+    print(f"⑤ 主观察对象迁入 observation_child：新增 {inserted} 条，当前共 {total} 条")
+
+
 def add_missing_observationtag_columns():
     """给 observationtag 表补充与 AI 调用记录的可空关联。"""
     conn = sqlite3.connect(DB_FILE)
@@ -124,9 +194,9 @@ def add_missing_observationtag_columns():
     conn.close()
 
     if added:
-        print(f"③ observationtag 表新增字段：{'、'.join(added)}")
+        print(f"⑥ observationtag 表新增字段：{'、'.join(added)}")
     else:
-        print("③ observationtag 表字段已齐全，无需改动")
+        print("⑥ observationtag 表字段已齐全，无需改动")
 
 
 def add_missing_ai_run_columns():
@@ -146,9 +216,9 @@ def add_missing_ai_run_columns():
     conn.close()
 
     if added:
-        print(f"④ ai_run 表新增字段：{'、'.join(added)}")
+        print(f"⑦ ai_run 表新增字段：{'、'.join(added)}")
     else:
-        print("④ ai_run 表字段已齐全，无需改动")
+        print("⑦ ai_run 表字段已齐全，无需改动")
 
 
 def migrate_status_values():
@@ -161,7 +231,7 @@ def migrate_status_values():
     migrated = cur.rowcount
     conn.commit()
     conn.close()
-    print(f"⑤ 状态迁移：draft → ready_for_review，共 {migrated} 条")
+    print(f"⑧ 状态迁移：draft → ready_for_review，共 {migrated} 条")
 
 
 def rebuild_observation_for_quick_capture():
@@ -176,7 +246,7 @@ def rebuild_observation_for_quick_capture():
     )
     if already_migrated:
         conn.close()
-        print("⑥ observation 可空约束已符合现场沉淀模型，无需重建")
+        print("⑨ observation 可空约束已符合现场沉淀模型，无需重建")
         return
 
     column_names = [
@@ -184,7 +254,7 @@ def rebuild_observation_for_quick_capture():
         "status", "classroom_id", "purpose", "note", "narrative",
         "narrative_source", "narrative_ai_raw", "analysis", "strategy",
         "created_at", "confirmed_at", "processing_started_at", "ready_at",
-        "failure_reason",
+        "failure_reason", "observer_id", "location", "background_note",
     ]
 
     conn.execute("PRAGMA foreign_keys = OFF")
@@ -212,9 +282,13 @@ def rebuild_observation_for_quick_capture():
                 processing_started_at DATETIME,
                 ready_at DATETIME,
                 failure_reason TEXT,
+                observer_id INTEGER,
+                location TEXT,
+                background_note TEXT,
                 FOREIGN KEY(child_id) REFERENCES child(id),
                 FOREIGN KEY(area_id) REFERENCES area(id),
-                FOREIGN KEY(classroom_id) REFERENCES classroom(id)
+                FOREIGN KEY(classroom_id) REFERENCES classroom(id),
+                FOREIGN KEY(observer_id) REFERENCES teacher(id)
             )
         """)
         joined = ", ".join(column_names)
@@ -235,7 +309,7 @@ def rebuild_observation_for_quick_capture():
     conn.close()
     if foreign_key_errors:
         raise RuntimeError(f"迁移后外键检查失败：{foreign_key_errors}")
-    print("⑥ observation 已重建：child_id、media_type 改为可空，原数据已复制")
+    print("⑨ observation 已重建：child_id、media_type 改为可空，原数据已复制")
 
 
 def show_result():
@@ -263,10 +337,13 @@ if __name__ == "__main__":
     observation_summary("迁移前")
     create_new_tables()
     add_missing_columns()
+    add_missing_child_columns()
+    seed_default_teacher_and_backfill_observer()
+    migrate_observation_children()
     add_missing_observationtag_columns()
     add_missing_ai_run_columns()
     migrate_status_values()
     rebuild_observation_for_quick_capture()
     observation_summary("迁移后")
     show_result()
-    print("\n✅ 迁移完成：ai_run 与 observationtag.ai_run_id 已按需创建")
+    print("\n✅ 迁移完成：教师、多人观察对象及导出所需字段已就绪")

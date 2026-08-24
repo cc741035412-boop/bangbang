@@ -1,5 +1,6 @@
 from sqlmodel import Session, select
-from models import engine, Area, ClassRoom, Child
+from models import engine, Area, ClassRoom, Child, Teacher
+from config import DEFAULT_TEACHER_NAME
 
 # 8 个游戏区域
 AREAS = [
@@ -35,7 +36,10 @@ def seed():
         session.commit()        # 先存一次，数据库才会给这个班分配 id
         session.refresh(c)      # 把分配到的 id 读回来
 
-        # 3. 塞幼儿，挂到这个班下面
+        # 3. MVP 默认教师；接入登录后由账号决定当前教师
+        session.add(Teacher(name=DEFAULT_TEACHER_NAME, classroom_id=c.id))
+
+        # 4. 塞幼儿，挂到这个班下面
         for n in CHILDREN:
             session.add(Child(name=n, classroom_id=c.id))
 

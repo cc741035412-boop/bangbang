@@ -11,6 +11,9 @@ load_dotenv(ENV_FILE)
 
 # 接入登录后，班级应从当前教师账号取得。
 DEFAULT_CLASSROOM_ID = 1
+# 接入登录后，当前教师应从账号会话取得。
+DEFAULT_TEACHER_ID = 1
+DEFAULT_TEACHER_NAME = "默认教师"
 
 DATABASE_PATH = Path(os.getenv("BANGBANG_DB_PATH", "bangbang.db"))
 API_PORT = int(os.getenv("BANGBANG_API_PORT", "8001"))

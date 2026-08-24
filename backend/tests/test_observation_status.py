@@ -3,7 +3,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,7 +14,16 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import main
-from models import AIRun, Area, Child, ClassRoom, Observation, ObservationTag
+from models import (
+    AIRun,
+    Area,
+    Child,
+    ClassRoom,
+    Observation,
+    ObservationChild,
+    ObservationTag,
+    Teacher,
+)
 
 
 class ObservationStatusFlowTest(unittest.TestCase):
@@ -41,12 +50,23 @@ class ObservationStatusFlowTest(unittest.TestCase):
             session.commit()
             session.refresh(area)
             session.refresh(room)
-            child = Child(name="测试幼儿A", classroom_id=room.id)
+            teacher = Teacher(name="测试教师", classroom_id=room.id)
+            child = Child(
+                name="测试幼儿A",
+                classroom_id=room.id,
+                birth_date=date(2021, 5, 20),
+                gender="女",
+            )
+            second_child = Child(name="测试幼儿B", classroom_id=room.id, gender="男")
+            session.add(teacher)
             session.add(child)
+            session.add(second_child)
             session.commit()
             session.refresh(child)
+            session.refresh(second_child)
             self.area_id = area.id
             self.child_id = child.id
+            self.second_child_id = second_child.id
 
     def tearDown(self):
         self.ai_mode_patcher.stop()
@@ -280,6 +300,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(observation["status"], "uploaded")
         self.assertIsNone(observation["child_id"])
         self.assertEqual(observation["classroom_id"], 1)
+        self.assertEqual(observation["observer_id"], 1)
         self.assertEqual(observation["age_group"], "middle")
         self.assertIsNone(observation["media_type"])
 
@@ -335,6 +356,69 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(updated.json()["note"], "回看时确认幼儿")
         self.assertEqual(updated.json()["classroom_id"], original_classroom_id)
         self.assertEqual(updated.json()["age_group"], original_age_group)
+        detail = self.client.get(f"/observations/{observation['id']}").json()
+        self.assertEqual(detail["observer"]["name"], "测试教师")
+        self.assertEqual(len(detail["children"]), 1)
+        self.assertEqual(detail["children"][0]["id"], self.child_id)
+        self.assertTrue(detail["children"][0]["is_primary"])
+        self.assertEqual(detail["children"][0]["birth_date"], "2021-05-20")
+        self.assertEqual(detail["children"][0]["gender"], "女")
+
+    def test_multi_child_detail_and_confirmed_count_use_association(self):
+        with Session(main.engine) as session:
+            first = Observation(
+                child_id=self.child_id,
+                area_id=self.area_id,
+                classroom_id=1,
+                observer_id=1,
+                age_group="middle",
+                status="confirmed",
+            )
+            second = Observation(
+                child_id=self.second_child_id,
+                area_id=self.area_id,
+                classroom_id=1,
+                observer_id=1,
+                age_group="middle",
+                status="confirmed",
+            )
+            session.add(first)
+            session.add(second)
+            session.flush()
+            session.add_all([
+                ObservationChild(
+                    observation_id=first.id,
+                    child_id=self.child_id,
+                    is_primary=True,
+                ),
+                ObservationChild(
+                    observation_id=first.id,
+                    child_id=self.second_child_id,
+                    is_primary=False,
+                ),
+                ObservationChild(
+                    observation_id=second.id,
+                    child_id=self.second_child_id,
+                    is_primary=True,
+                ),
+            ])
+            session.commit()
+            first_id = first.id
+
+        detail = self.client.get(f"/observations/{first_id}")
+        self.assertEqual(detail.status_code, 200)
+        body = detail.json()
+        self.assertEqual(body["child_confirmed_count"], 1)
+        self.assertEqual(
+            [(item["id"], item["is_primary"]) for item in body["children"]],
+            [(self.child_id, True), (self.second_child_id, False)],
+        )
+        counts = {
+            item["id"]: item["confirmed_observation_count"]
+            for item in body["children"]
+        }
+        self.assertEqual(counts[self.child_id], 1)
+        self.assertEqual(counts[self.second_child_id], 2)
 
     def test_upload_limit_and_read_media_file(self):
         image_content = b"mock-image-content"

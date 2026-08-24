@@ -1,6 +1,7 @@
 from typing import Dict, Optional
-from datetime import datetime
-from sqlalchemy import Column, JSON
+from datetime import date, datetime
+from enum import Enum
+from sqlalchemy import Column, Enum as SAEnum, JSON
 from sqlmodel import SQLModel, Field, create_engine
 from config import DATABASE_PATH, SQL_ECHO
 from time_utils import UTCDateTime, utc_now
@@ -21,19 +22,44 @@ class ClassRoom(SQLModel, table=True):
 
 
 # ========== 表3：幼儿 ==========
+class Gender(str, Enum):
+    MALE = "男"
+    FEMALE = "女"
+
+
 class Child(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    classroom_id: int = Field(foreign_key="classroom.id")
+    birth_date: Optional[date] = None
+    gender: Optional[Gender] = Field(
+        default=None,
+        sa_column=Column(
+            SAEnum(
+                Gender,
+                values_callable=lambda values: [item.value for item in values],
+                native_enum=False,
+            ),
+            nullable=True,
+        ),
+    )
+
+
+# ========== 表4：教师 ==========
+class Teacher(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     classroom_id: int = Field(foreign_key="classroom.id")
 
 
-# ========== 表4：观察记录 ==========
+# ========== 表5：观察记录 ==========
 class Observation(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
     child_id: Optional[int] = Field(default=None, foreign_key="child.id")
     area_id: int = Field(foreign_key="area.id")
     classroom_id: Optional[int] = Field(default=None, foreign_key="classroom.id")
+    observer_id: Optional[int] = Field(default=None, foreign_key="teacher.id")
 
     observed_at: datetime = Field(
         default_factory=utc_now,
@@ -41,6 +67,8 @@ class Observation(SQLModel, table=True):
     )
     age_group: str      # 快照：拍摄当时的年龄段。孩子会升班，历史记录的判定依据不能跟着变
     media_type: Optional[str] = None  # image / video；绑定首个素材时由 MIME 推断
+    location: Optional[str] = None
+    background_note: Optional[str] = None
 
     # ---- 一份完整观察记录的四段，格式来自真实教研文书 ----
     purpose: Optional[str] = None      # ① 观察目的（教师拍摄前就预设好的）
@@ -75,7 +103,16 @@ class Observation(SQLModel, table=True):
     failure_reason: Optional[str] = None
 
 
-# ========== 表5：素材 ==========
+# ========== 表6：观察记录与幼儿的多对多关联 ==========
+class ObservationChild(SQLModel, table=True):
+    __tablename__ = "observation_child"
+
+    observation_id: int = Field(foreign_key="observation.id", primary_key=True)
+    child_id: int = Field(foreign_key="child.id", primary_key=True)
+    is_primary: bool = False
+
+
+# ========== 表7：素材 ==========
 class Media(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     stored_filename: str                  # uploads/ 里的真实文件名
@@ -89,7 +126,7 @@ class Media(SQLModel, table=True):
     )
 
 
-# ========== 表6：AI 调用记录 ==========
+# ========== 表8：AI 调用记录 ==========
 class AIRun(SQLModel, table=True):
     """一次 AI 工作流调用的完整审计记录。"""
 
@@ -125,7 +162,7 @@ class AIRun(SQLModel, table=True):
     temperature: Optional[float] = None
 
 
-# ========== 表7：指标标注（本项目最重要的一张表）==========
+# ========== 表9：指标标注（本项目最重要的一张表）==========
 class ObservationTag(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     observation_id: int = Field(foreign_key="observation.id")

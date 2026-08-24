@@ -12,7 +12,7 @@
 
 from pathlib import Path
 from uuid import uuid4
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List, Literal
 import shutil
 import subprocess
@@ -25,11 +25,11 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from models import (
-    engine, Area, ClassRoom, Child,
-    Observation, Media, AIRun, ObservationTag,
+    engine, Area, ClassRoom, Child, Teacher,
+    Observation, ObservationChild, Media, AIRun, ObservationTag,
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
-from config import DEFAULT_CLASSROOM_ID, UPLOAD_DIR
+from config import DEFAULT_CLASSROOM_ID, DEFAULT_TEACHER_ID, UPLOAD_DIR
 from time_utils import utc_now
 import ai_service
 
@@ -89,6 +89,8 @@ class ObservationUpdate(BaseModel):
     narrative: Optional[str] = None
     analysis: Optional[str] = None
     strategy: Optional[str] = None
+    location: Optional[str] = None
+    background_note: Optional[str] = None
 
 
 class ObservationCreate(BaseModel):
@@ -98,6 +100,8 @@ class ObservationCreate(BaseModel):
     area_id: int
     child_id: Optional[int] = None
     note: Optional[str] = None
+    location: Optional[str] = None
+    background_note: Optional[str] = None
 
 
 ObservationStatus = Literal[
@@ -117,9 +121,12 @@ class ObservationResponse(BaseModel):
     child_id: Optional[int] = None
     area_id: int
     classroom_id: Optional[int] = None
+    observer_id: Optional[int] = None
     observed_at: datetime
     age_group: str
     media_type: Optional[str] = None
+    location: Optional[str] = None
+    background_note: Optional[str] = None
     purpose: Optional[str] = None
     note: Optional[str] = None
     narrative: Optional[str] = None
@@ -166,6 +173,24 @@ class MediaResponse(BaseModel):
     thumbnail_failure_reason: Optional[str] = None
 
 
+class RelatedChildResponse(BaseModel):
+    id: int
+    name: str
+    classroom_id: int
+    birth_date: Optional[date] = None
+    gender: Optional[Literal["男", "女"]] = None
+    is_primary: bool
+    confirmed_observation_count: int = 0
+
+
+class TeacherResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    classroom_id: int
+
+
 class NarrativeGenerationResponse(BaseModel):
     observation_id: int
     status: ObservationStatus
@@ -182,6 +207,8 @@ class ObservationDetailResponse(ObservationResponse):
     classroom_name: Optional[str] = None
     area_name: Optional[str] = None
     child_confirmed_count: int = 0
+    children: List[RelatedChildResponse]
+    observer: Optional[TeacherResponse] = None
     media: List[MediaResponse]
     tags: List[ObservationTagResponse]
 
@@ -229,6 +256,45 @@ def transition_observation(
         obs.confirmed_at = now
     elif target_status == "failed":
         obs.failure_reason = failure_reason or "AI 处理失败"
+
+
+def sync_primary_child(session: Session, observation_id: int, child_id: Optional[int]):
+    """让兼容字段 child_id 与多人关联表中的主观察对象保持一致。"""
+    primary_links = session.exec(
+        select(ObservationChild).where(
+            ObservationChild.observation_id == observation_id,
+            ObservationChild.is_primary == True,  # noqa: E712
+        )
+    ).all()
+    for link in primary_links:
+        if child_id is None or link.child_id != child_id:
+            session.delete(link)
+
+    if child_id is None:
+        return
+    link = session.get(ObservationChild, (observation_id, child_id))
+    if link:
+        link.is_primary = True
+    else:
+        link = ObservationChild(
+            observation_id=observation_id,
+            child_id=child_id,
+            is_primary=True,
+        )
+    session.add(link)
+
+
+def confirmed_observation_count(session: Session, child_id: int) -> int:
+    """多人记录会分别计入每个关联幼儿的成长档案。"""
+    return session.exec(
+        select(func.count(ObservationChild.observation_id)).join(
+            Observation,
+            Observation.id == ObservationChild.observation_id,
+        ).where(
+            ObservationChild.child_id == child_id,
+            Observation.status == "confirmed",
+        )
+    ).one()
 
 
 def resolve_upload_type(file: UploadFile):
@@ -473,7 +539,12 @@ def get_media_thumbnail(media_id: int):
 def create_observation(payload: ObservationCreate):
     """现场新建观察记录；只要求游戏区，状态固定为 uploaded。"""
     with Session(engine) as s:
-        room = s.get(ClassRoom, DEFAULT_CLASSROOM_ID)
+        teacher = s.get(Teacher, DEFAULT_TEACHER_ID)
+        if not teacher:
+            raise HTTPException(500, "默认教师配置无效，请检查 DEFAULT_TEACHER_ID")
+        if teacher.classroom_id != DEFAULT_CLASSROOM_ID:
+            raise HTTPException(500, "默认教师与默认班级配置不一致")
+        room = s.get(ClassRoom, teacher.classroom_id)
         if not room:
             raise HTTPException(500, "默认班级配置无效，请检查 DEFAULT_CLASSROOM_ID")
         if payload.child_id is not None and not s.get(Child, payload.child_id):
@@ -482,12 +553,17 @@ def create_observation(payload: ObservationCreate):
             child_id=payload.child_id,
             area_id=payload.area_id,
             classroom_id=room.id,
+            observer_id=teacher.id,
             age_group=room.age_group,
             media_type=None,
             note=payload.note,
+            location=payload.location,
+            background_note=payload.background_note,
             status="uploaded",
         )
         s.add(observation)
+        s.flush()
+        sync_primary_child(s, observation.id, payload.child_id)
         s.commit()
         s.refresh(observation)
         return observation
@@ -572,6 +648,9 @@ def update_observation(obs_id: int, payload: ObservationUpdate):
 
         for k, v in data.items():
             setattr(obs, k, v)
+
+        if "child_id" in data:
+            sync_primary_child(s, obs.id, data["child_id"])
 
         s.add(obs)
         s.commit()
@@ -946,20 +1025,39 @@ def get_observation_detail(obs_id: int):
             raise HTTPException(404, "观察记录不存在")
 
         child = s.get(Child, obs.child_id) if obs.child_id is not None else None
+        observer = s.get(Teacher, obs.observer_id) if obs.observer_id is not None else None
         area = s.get(Area, obs.area_id)
         room = s.get(ClassRoom, obs.classroom_id) if obs.classroom_id else None
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).all()
         tags = s.exec(
             select(ObservationTag).where(ObservationTag.observation_id == obs_id)
         ).all()
-        child_confirmed_count = 0
-        if obs.child_id is not None:
-            child_confirmed_count = s.exec(
-                select(func.count(Observation.id)).where(
-                    Observation.child_id == obs.child_id,
-                    Observation.status == "confirmed",
-                )
-            ).one()
+        child_links = s.exec(
+            select(ObservationChild)
+            .where(ObservationChild.observation_id == obs_id)
+            .order_by(ObservationChild.is_primary.desc(), ObservationChild.child_id)
+        ).all()
+        related_children = []
+        for link in child_links:
+            related_child = s.get(Child, link.child_id)
+            if not related_child:
+                continue
+            related_children.append(RelatedChildResponse(
+                id=related_child.id,
+                name=related_child.name,
+                classroom_id=related_child.classroom_id,
+                birth_date=related_child.birth_date,
+                gender=related_child.gender,
+                is_primary=link.is_primary,
+                confirmed_observation_count=confirmed_observation_count(
+                    s, related_child.id
+                ),
+            ))
+        child_confirmed_count = (
+            confirmed_observation_count(s, obs.child_id)
+            if obs.child_id is not None
+            else 0
+        )
 
         return ObservationDetailResponse(
             **obs.model_dump(),
@@ -967,6 +1065,8 @@ def get_observation_detail(obs_id: int):
             classroom_name=room.name if room else None,
             area_name=area.name if area else None,
             child_confirmed_count=child_confirmed_count,
+            children=related_children,
+            observer=observer,
             media=media,
             tags=tags,
         )
