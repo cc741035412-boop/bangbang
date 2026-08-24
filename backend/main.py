@@ -905,8 +905,17 @@ def add_tag_by_teacher(obs_id: int, payload: TagCreate):
         if not obs:
             raise HTTPException(404, "观察记录不存在")
 
+        latest_candidate = s.exec(
+            select(ObservationTag).where(
+                ObservationTag.observation_id == obs_id,
+                ObservationTag.ai_run_id != None,  # noqa: E711
+                ObservationTag.source.in_({"ai_suggested", "system_determined"}),
+            ).order_by(ObservationTag.id.desc())
+        ).first()
+
         tag = ObservationTag(
             observation_id=obs_id,
+            ai_run_id=latest_candidate.ai_run_id if latest_candidate else None,
             indicator_code=payload.indicator_code,
             indicator_name=item["name"],
             level=payload.level,
@@ -974,34 +983,131 @@ def ai_quality():
     """
     with Session(engine) as s:
         tags = s.exec(select(ObservationTag)).all()
+        runs = s.exec(select(AIRun)).all()
 
-    ai_tags = [t for t in tags if t.source == "ai_suggested"]
-    resolved = [t for t in ai_tags if t.accepted is not None]
-    accepted = [t for t in resolved if t.accepted]
-    teacher_added = [t for t in tags if t.source == "teacher_added"]
-    # 系统纯计算判定不属于 AI 猜测，不能稀释 AI 漏检率。
-    all_accepted = [
-        t for t in tags
-        if t.source in {"ai_suggested", "teacher_added"} and t.accepted is True
-    ]
+    def quality_summary(group_tags):
+        ai_tags = [t for t in group_tags if t.source == "ai_suggested"]
+        resolved = [t for t in ai_tags if t.accepted is not None]
+        accepted = [t for t in resolved if t.accepted]
+        teacher_added = [t for t in group_tags if t.source == "teacher_added"]
+        all_accepted = [
+            t for t in group_tags
+            if t.source in {"ai_suggested", "teacher_added"} and t.accepted is True
+        ]
 
-    by_dim = {}
-    for t in resolved:
-        dim = INDICATORS.get(t.indicator_code, {}).get("dimension", "未知")
-        d = by_dim.setdefault(dim, {"已处理": 0, "采纳": 0})
-        d["已处理"] += 1
-        if t.accepted:
-            d["采纳"] += 1
-    for d in by_dim.values():
-        d["采纳率"] = round(d["采纳"] / d["已处理"], 3) if d["已处理"] else None
+        by_dim = {}
+        for tag in resolved:
+            dim = INDICATORS.get(tag.indicator_code, {}).get("dimension", "未知")
+            dimension = by_dim.setdefault(dim, {"已处理": 0, "采纳": 0})
+            dimension["已处理"] += 1
+            if tag.accepted:
+                dimension["采纳"] += 1
+        for dimension in by_dim.values():
+            dimension["采纳率"] = (
+                round(dimension["采纳"] / dimension["已处理"], 3)
+                if dimension["已处理"] else None
+            )
+
+        return {
+            "AI建议总数": len(ai_tags),
+            "教师已处理": len(resolved),
+            "教师采纳": len(accepted),
+            "采纳率": round(len(accepted) / len(resolved), 3) if resolved else None,
+            "教师自己补的": len(teacher_added),
+            "漏检率": (
+                round(len(teacher_added) / len(all_accepted), 3)
+                if all_accepted else None
+            ),
+            "分维度采纳率": by_dim,
+        }
+
+    run_by_id = {run.id: run for run in runs}
+
+    def version_for_run_id(run_id):
+        if run_id is None:
+            return "rule-mock-v1"
+        run = run_by_id.get(run_id)
+        return run.prompt_version if run else "unknown-ai-run"
+
+    observation_versions = {}
+    for tag in tags:
+        if tag.source != "ai_suggested":
+            continue
+        observation_versions.setdefault(tag.observation_id, set()).add(
+            version_for_run_id(tag.ai_run_id)
+        )
+
+    def version_for_tag(tag):
+        if tag.ai_run_id is not None:
+            return version_for_run_id(tag.ai_run_id)
+        if tag.source == "teacher_added":
+            versions = observation_versions.get(tag.observation_id, set())
+            if len(versions) == 1:
+                return next(iter(versions))
+        return "rule-mock-v1"
+
+    grouped_tags = {}
+    for tag in tags:
+        if tag.source not in {"ai_suggested", "teacher_added"}:
+            continue
+        grouped_tags.setdefault(version_for_tag(tag), []).append(tag)
+
+    grouped_runs = {}
+    for run in runs:
+        grouped_runs.setdefault(run.prompt_version, []).append(run)
+
+    versions = set(grouped_tags) | set(grouped_runs)
+    version_details = {}
+    for version in sorted(versions):
+        version_runs = grouped_runs.get(version, [])
+        if version == "rule-mock-v1":
+            provider = "mock"
+            model = "demo-mock-rule-v1"
+            temperature = None
+        else:
+            providers = {run.provider for run in version_runs}
+            models = {run.model for run in version_runs}
+            temperatures = {
+                run.temperature for run in version_runs if run.temperature is not None
+            }
+            provider = next(iter(providers)) if len(providers) == 1 else "mixed"
+            model = next(iter(models)) if len(models) == 1 else "mixed"
+            temperature = (
+                next(iter(temperatures)) if len(temperatures) == 1
+                else "mixed" if temperatures else None
+            )
+
+        latency_values = [
+            run.latency_ms for run in version_runs if run.latency_ms is not None
+        ]
+        token_values = [
+            run.token_usage.get("total_tokens")
+            for run in version_runs
+            if isinstance(run.token_usage, dict)
+            and isinstance(run.token_usage.get("total_tokens"), (int, float))
+        ]
+        detail = {
+            "provider": provider,
+            "model": model,
+            "temperature": temperature,
+            **quality_summary(grouped_tags.get(version, [])),
+            "调用统计": {
+                "平均latency_ms": (
+                    round(sum(latency_values) / len(latency_values), 1)
+                    if latency_values else None
+                ),
+                "平均token消耗": (
+                    round(sum(token_values) / len(token_values), 1)
+                    if token_values else None
+                ),
+                "总调用次数": len(version_runs),
+                "失败次数": sum(run.status == "failed" for run in version_runs),
+            },
+        }
+        version_details[version] = detail
 
     return {
-        "AI建议总数": len(ai_tags),
-        "教师已处理": len(resolved),
-        "教师采纳": len(accepted),
-        "采纳率": round(len(accepted) / len(resolved), 3) if resolved else None,
-        "教师自己补的": len(teacher_added),
-        "漏检率": round(len(teacher_added) / len(all_accepted), 3) if all_accepted else None,
-        "分维度采纳率": by_dim,
+        **quality_summary(tags),
+        "按prompt_version": version_details,
         "说明": "指标可能混合 mock 与真实模型结果；可通过 ai_run 区分模型、prompt 版本与参数。",
     }

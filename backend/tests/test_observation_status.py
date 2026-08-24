@@ -167,6 +167,16 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(metrics["教师采纳"], 1)
         self.assertEqual(metrics["采纳率"], 0.5)
 
+        teacher_tag = self.client.post(
+            f"/observations/{observation_id}/tags",
+            json={"indicator_code": "4.3", "level": 2},
+        )
+        self.assertEqual(teacher_tag.status_code, 201)
+        self.assertEqual(
+            teacher_tag.json()["ai_run_id"],
+            suggestions.json()["ai_run_id"],
+        )
+
         confirmed = self.client.post(f"/observations/{observation_id}/confirm")
         self.assertEqual(confirmed.status_code, 200)
         confirmed_observation = confirmed.json()["observation"]
@@ -631,6 +641,142 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 )
             ).all()
             self.assertTrue(all(tag.ai_run_id == run.id for tag in tags))
+
+    def test_ai_quality_is_grouped_cleanly_by_prompt_version(self):
+        legacy_observation = self.client.post(
+            "/observations", json={"area_id": self.area_id}
+        ).json()
+        v2_observation = self.client.post(
+            "/observations", json={"area_id": self.area_id}
+        ).json()
+
+        with Session(main.engine) as session:
+            completed_run = AIRun(
+                observation_id=v2_observation["id"],
+                workflow="indicator_suggestion",
+                provider="deepseek",
+                model="deepseek-chat",
+                prompt_version="wf-b-v2",
+                status="completed",
+                latency_ms=1000,
+                response_raw={},
+                is_mock=False,
+                prompt_rendered="test prompt",
+                token_usage={"total_tokens": 400},
+                temperature=1.0,
+            )
+            failed_run = AIRun(
+                observation_id=v2_observation["id"],
+                workflow="indicator_suggestion",
+                provider="deepseek",
+                model="deepseek-chat",
+                prompt_version="wf-b-v2",
+                status="failed",
+                latency_ms=3000,
+                response_raw={},
+                error_reason="test failure",
+                is_mock=True,
+                prompt_rendered="test prompt",
+                temperature=1.0,
+            )
+            session.add(completed_run)
+            session.add(failed_run)
+            session.commit()
+            session.refresh(completed_run)
+
+            session.add_all([
+                ObservationTag(
+                    observation_id=legacy_observation["id"],
+                    indicator_code="1.3",
+                    indicator_name="身体行为复杂性",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=True,
+                ),
+                ObservationTag(
+                    observation_id=legacy_observation["id"],
+                    indicator_code="4.4",
+                    indicator_name="试误与问题解决",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=False,
+                ),
+                ObservationTag(
+                    observation_id=legacy_observation["id"],
+                    indicator_code="1.2",
+                    indicator_name="身体探索方式",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=None,
+                ),
+                ObservationTag(
+                    observation_id=legacy_observation["id"],
+                    indicator_code="4.3",
+                    indicator_name="分析与规划",
+                    level=2,
+                    source="teacher_added",
+                    accepted=True,
+                ),
+                ObservationTag(
+                    observation_id=v2_observation["id"],
+                    ai_run_id=completed_run.id,
+                    indicator_code="1.3",
+                    indicator_name="身体行为复杂性",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=True,
+                ),
+                ObservationTag(
+                    observation_id=v2_observation["id"],
+                    ai_run_id=completed_run.id,
+                    indicator_code="4.4",
+                    indicator_name="试误与问题解决",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=False,
+                ),
+                ObservationTag(
+                    observation_id=v2_observation["id"],
+                    ai_run_id=completed_run.id,
+                    indicator_code="4.3",
+                    indicator_name="分析与规划",
+                    level=2,
+                    source="teacher_added",
+                    accepted=True,
+                ),
+            ])
+            session.commit()
+
+        metrics = self.client.get("/metrics/ai-quality")
+        self.assertEqual(metrics.status_code, 200)
+        body = metrics.json()
+        self.assertEqual(body["AI建议总数"], 5)
+        self.assertEqual(body["教师已处理"], 4)
+        self.assertEqual(body["教师采纳"], 2)
+        self.assertEqual(body["采纳率"], 0.5)
+        self.assertEqual(body["教师自己补的"], 2)
+        self.assertEqual(body["漏检率"], 0.5)
+
+        legacy = body["按prompt_version"]["rule-mock-v1"]
+        self.assertEqual(legacy["provider"], "mock")
+        self.assertEqual(legacy["AI建议总数"], 3)
+        self.assertEqual(legacy["教师已处理"], 2)
+        self.assertEqual(legacy["教师采纳"], 1)
+        self.assertEqual(legacy["教师自己补的"], 1)
+        self.assertEqual(legacy["调用统计"]["总调用次数"], 0)
+
+        v2 = body["按prompt_version"]["wf-b-v2"]
+        self.assertEqual(v2["provider"], "deepseek")
+        self.assertEqual(v2["model"], "deepseek-chat")
+        self.assertEqual(v2["temperature"], 1.0)
+        self.assertEqual(v2["AI建议总数"], 2)
+        self.assertEqual(v2["教师已处理"], 2)
+        self.assertEqual(v2["教师采纳"], 1)
+        self.assertEqual(v2["教师自己补的"], 1)
+        self.assertEqual(v2["调用统计"]["平均latency_ms"], 2000.0)
+        self.assertEqual(v2["调用统计"]["平均token消耗"], 400.0)
+        self.assertEqual(v2["调用统计"]["总调用次数"], 2)
+        self.assertEqual(v2["调用统计"]["失败次数"], 1)
 
 
 if __name__ == "__main__":
