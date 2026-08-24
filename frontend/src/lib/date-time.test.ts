@@ -2,6 +2,7 @@ import {
   compareTimestampsDescending,
   formatKindergartenDateTime,
   formatKindergartenTime,
+  getKindergartenYearMonth,
   isKindergartenToday,
   parseApiTimestamp,
 } from "./date-time";
@@ -28,5 +29,10 @@ describe("date-time", () => {
       "2026-08-23T12:00:00Z",
       "2026-08-23T13:00:00Z",
     )).toBeGreaterThan(0);
+  });
+
+  it("uses the Beijing month for monthly export", () => {
+    expect(getKindergartenYearMonth(new Date("2026-07-31T16:30:00Z")))
+      .toEqual({ year: 2026, month: 8 });
   });
 });

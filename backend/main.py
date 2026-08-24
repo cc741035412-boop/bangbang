@@ -13,13 +13,15 @@
 from pathlib import Path
 from uuid import uuid4
 from datetime import date, datetime
+from io import BytesIO
 from typing import Optional, List, Literal
+from urllib.parse import quote
 import shutil
 import subprocess
 import tempfile
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -31,6 +33,15 @@ from models import (
 from indicators import INDICATORS, all_indicators_flat, level_desc
 from config import DEFAULT_CLASSROOM_ID, DEFAULT_TEACHER_ID, UPLOAD_DIR
 from time_utils import utc_now
+from export_service import (
+    DOCX_MEDIA_TYPE,
+    ExportChild,
+    ExportIndicator,
+    ExportObservation,
+    build_observation_document,
+    child_names,
+    kindergarten_datetime,
+)
 import ai_service
 
 app = FastAPI(
@@ -1070,6 +1081,143 @@ def get_observation_detail(obs_id: int):
             media=media,
             tags=tags,
         )
+
+
+def export_observation_data(session: Session, obs: Observation) -> ExportObservation:
+    """把数据库记录整理成与 DOCX 模板解耦的导出数据。"""
+    area = session.get(Area, obs.area_id)
+    observer = session.get(Teacher, obs.observer_id) if obs.observer_id else None
+    links = session.exec(
+        select(ObservationChild)
+        .where(ObservationChild.observation_id == obs.id)
+        .order_by(ObservationChild.is_primary.desc(), ObservationChild.child_id)
+    ).all()
+    export_children = []
+    for link in links:
+        child = session.get(Child, link.child_id)
+        if not child:
+            continue
+        gender = child.gender.value if hasattr(child.gender, "value") else child.gender
+        export_children.append(ExportChild(
+            name=child.name,
+            birth_date=child.birth_date,
+            gender=gender,
+        ))
+
+    # 兼容尚未跑多人迁移的独立测试库；正式库以关联表为唯一多人来源。
+    if not export_children and obs.child_id is not None:
+        child = session.get(Child, obs.child_id)
+        if child:
+            gender = child.gender.value if hasattr(child.gender, "value") else child.gender
+            export_children.append(ExportChild(
+                name=child.name,
+                birth_date=child.birth_date,
+                gender=gender,
+            ))
+
+    tags = session.exec(
+        select(ObservationTag)
+        .where(
+            ObservationTag.observation_id == obs.id,
+            ObservationTag.accepted == True,  # noqa: E712
+            ObservationTag.source.in_({
+                "system_determined",
+                "ai_suggested",
+                "teacher_added",
+            }),
+        )
+        .order_by(ObservationTag.id)
+    ).all()
+    return ExportObservation(
+        observation_id=obs.id,
+        observed_at=obs.observed_at,
+        age_group=obs.age_group,
+        area_name=area.name if area else "",
+        observer_name=observer.name if observer else "",
+        children=export_children,
+        location=obs.location,
+        background_note=obs.background_note,
+        purpose=obs.purpose,
+        narrative=obs.narrative,
+        analysis=obs.analysis,
+        strategy=obs.strategy,
+        indicators=[
+            ExportIndicator(code=tag.indicator_code, name=tag.indicator_name, level=tag.level)
+            for tag in tags
+        ],
+    )
+
+
+def safe_filename_part(value: str) -> str:
+    """去掉系统文件名禁用字符，同时保留中文可读性。"""
+    return "".join("_" if char in '\\/:*?\"<>|' else char for char in value).strip() or "未填写"
+
+
+def docx_download(content: bytes, filename: str):
+    encoded = quote(filename)
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="observation.docx"; filename*=UTF-8\'\'{encoded}'
+        ),
+        "Content-Length": str(len(content)),
+    }
+    return StreamingResponse(BytesIO(content), media_type=DOCX_MEDIA_TYPE, headers=headers)
+
+
+@app.get("/observations/{obs_id}/export", tags=["5·成果"])
+def export_observation(
+    obs_id: int,
+    include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
+):
+    """按园所固定 4 列 8 行模板导出一条已确认观察记录。"""
+    with Session(engine) as s:
+        obs = s.get(Observation, obs_id)
+        if not obs:
+            raise HTTPException(404, "观察记录不存在")
+        if obs.status != "confirmed":
+            raise HTTPException(400, "未确认的记录不能导出")
+        record = export_observation_data(s, obs)
+
+    local = kindergarten_datetime(record.observed_at)
+    names = safe_filename_part(child_names(record) or "未指定幼儿")
+    filename = f"观察记录_{names}_{local:%Y%m%d}.docx"
+    content = build_observation_document(
+        [record],
+        include_indicators=include_indicators,
+    )
+    return docx_download(content, filename)
+
+
+@app.get("/exports/monthly", tags=["5·成果"])
+def export_monthly_observations(
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
+):
+    """导出指定北京时间月份内的全部已确认观察记录。"""
+    with Session(engine) as s:
+        confirmed = s.exec(
+            select(Observation).where(Observation.status == "confirmed")
+        ).all()
+        selected = [
+            obs for obs in confirmed
+            if (
+                kindergarten_datetime(obs.observed_at).year == year
+                and kindergarten_datetime(obs.observed_at).month == month
+            )
+        ]
+        selected.sort(key=lambda obs: kindergarten_datetime(obs.observed_at))
+        if not selected:
+            raise HTTPException(404, f"{year}年{month}月没有已确认的观察记录")
+        records = [export_observation_data(s, obs) for obs in selected]
+
+    observer_name = safe_filename_part(records[0].observer_name or "未填写")
+    filename = f"自主游戏观察记录_{year}年{month}月_{observer_name}.docx"
+    content = build_observation_document(
+        records,
+        include_indicators=include_indicators,
+    )
+    return docx_download(content, filename)
 
 
 @app.get("/metrics/ai-quality", tags=["5·成果"])

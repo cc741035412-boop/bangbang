@@ -33,6 +33,12 @@ const KINDERGARTEN_DATE_KEY_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: KINDERGARTEN_TIME_ZONE,
 });
 
+const KINDERGARTEN_YEAR_MONTH_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  timeZone: KINDERGARTEN_TIME_ZONE,
+});
+
 export function parseApiTimestamp(value: string) {
   return new Date(value);
 }
@@ -57,4 +63,12 @@ export function isKindergartenToday(value?: string | null) {
 
 export function compareTimestampsDescending(a?: string | null, b?: string | null) {
   return Date.parse(b ?? "") - Date.parse(a ?? "");
+}
+
+export function getKindergartenYearMonth(value = new Date()) {
+  const parts = KINDERGARTEN_YEAR_MONTH_FORMATTER.formatToParts(value);
+  return {
+    year: Number(parts.find((part) => part.type === "year")?.value),
+    month: Number(parts.find((part) => part.type === "month")?.value),
+  };
 }

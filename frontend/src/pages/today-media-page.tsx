@@ -1,15 +1,16 @@
-import { Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
+import { Download, Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 
 import { MediaThumbnail } from "../components/media-thumbnail";
 import { MobilePage } from "../components/mobile-page";
-import { useTodayMediaData } from "../features/observations/api";
+import { getMonthlyExportUrl, useTodayMediaData } from "../features/observations/api";
 import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
 import {
   compareTimestampsDescending,
   formatKindergartenTime,
   formatKindergartenToday,
+  getKindergartenYearMonth,
   isKindergartenToday,
 } from "../lib/date-time";
 
@@ -20,6 +21,7 @@ export function TodayMediaPage() {
   const location = useLocation();
   const successState = location.state as SuccessState | null;
   const [onlyNeedsReview, setOnlyNeedsReview] = useState(false);
+  const [includeIndicators, setIncludeIndicators] = useState(false);
   const { observations, areas, children, media } = useTodayMediaData();
 
   const areaNames = useMemo(
@@ -49,6 +51,7 @@ export function TodayMediaPage() {
     : todayRecords;
   const isLoading = observations.isLoading || areas.isLoading || children.isLoading || media.isLoading;
   const hasError = observations.isError || areas.isError || children.isError || media.isError;
+  const currentMonth = getKindergartenYearMonth();
 
   return (
     <MobilePage>
@@ -71,6 +74,25 @@ export function TodayMediaPage() {
             </button>
           )}
         </header>
+
+        <section className="mb-5 rounded-2xl border border-brand/15 bg-surface p-3" aria-label="月度导出">
+          <a
+            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand-soft px-4 font-bold text-brand-deep"
+            download
+            href={getMonthlyExportUrl(currentMonth.year, currentMonth.month, includeIndicators)}
+          >
+            <Download aria-hidden size={18} /> 导出本月
+          </a>
+          <label className="mt-2 flex min-h-10 items-center justify-center gap-2 text-sm text-ink-muted">
+            <input
+              checked={includeIndicators}
+              className="size-4 accent-brand"
+              onChange={(event) => setIncludeIndicators(event.target.checked)}
+              type="checkbox"
+            />
+            附带指标
+          </label>
+        </section>
 
         {successState?.captureDuration != null && (
           <button

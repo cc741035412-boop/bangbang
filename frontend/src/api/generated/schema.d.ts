@@ -340,6 +340,46 @@ export interface paths {
         patch: operations["decide_tag_observations__obs_id__tags__tag_id__patch"];
         trace?: never;
     };
+    "/observations/{obs_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Observation
+         * @description 按园所固定 4 列 8 行模板导出一条已确认观察记录。
+         */
+        get: operations["export_observation_observations__obs_id__export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/exports/monthly": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Monthly Observations
+         * @description 导出指定北京时间月份内的全部已确认观察记录。
+         */
+        get: operations["export_monthly_observations_exports_monthly_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/metrics/ai-quality": {
         parameters: {
             query?: never;
@@ -442,6 +482,10 @@ export interface components {
             child_id?: number | null;
             /** Note */
             note?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Background Note */
+            background_note?: string | null;
         };
         /** ObservationDetailResponse */
         ObservationDetailResponse: {
@@ -453,6 +497,8 @@ export interface components {
             area_id: number;
             /** Classroom Id */
             classroom_id?: number | null;
+            /** Observer Id */
+            observer_id?: number | null;
             /**
              * Observed At
              * Format: date-time
@@ -462,6 +508,10 @@ export interface components {
             age_group: string;
             /** Media Type */
             media_type?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Background Note */
+            background_note?: string | null;
             /** Purpose */
             purpose?: string | null;
             /** Note */
@@ -502,6 +552,9 @@ export interface components {
              * @default 0
              */
             child_confirmed_count: number;
+            /** Children */
+            children: components["schemas"]["RelatedChildResponse"][];
+            observer?: components["schemas"]["TeacherResponse"] | null;
             /** Media */
             media: components["schemas"]["MediaResponse"][];
             /** Tags */
@@ -520,6 +573,8 @@ export interface components {
             area_id: number;
             /** Classroom Id */
             classroom_id?: number | null;
+            /** Observer Id */
+            observer_id?: number | null;
             /**
              * Observed At
              * Format: date-time
@@ -529,6 +584,10 @@ export interface components {
             age_group: string;
             /** Media Type */
             media_type?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Background Note */
+            background_note?: string | null;
             /** Purpose */
             purpose?: string | null;
             /** Note */
@@ -609,6 +668,30 @@ export interface components {
             analysis?: string | null;
             /** Strategy */
             strategy?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Background Note */
+            background_note?: string | null;
+        };
+        /** RelatedChildResponse */
+        RelatedChildResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Classroom Id */
+            classroom_id: number;
+            /** Birth Date */
+            birth_date?: string | null;
+            /** Gender */
+            gender?: ("男" | "女") | null;
+            /** Is Primary */
+            is_primary: boolean;
+            /**
+             * Confirmed Observation Count
+             * @default 0
+             */
+            confirmed_observation_count: number;
         };
         /**
          * TagCreate
@@ -629,6 +712,15 @@ export interface components {
             accepted: boolean;
             /** Reject Reason */
             reject_reason?: string | null;
+        };
+        /** TeacherResponse */
+        TeacherResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Classroom Id */
+            classroom_id: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -1201,6 +1293,74 @@ export interface operations {
                 "application/json": components["schemas"]["TagDecision"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_observation_observations__obs_id__export_get: {
+        parameters: {
+            query?: {
+                /** @description 是否在观察分析末尾附带已采纳指标 */
+                include_indicators?: boolean;
+            };
+            header?: never;
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_monthly_observations_exports_monthly_get: {
+        parameters: {
+            query: {
+                year: number;
+                month: number;
+                /** @description 是否在观察分析末尾附带已采纳指标 */
+                include_indicators?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

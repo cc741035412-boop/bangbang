@@ -453,6 +453,19 @@ export function getMediaThumbnailUrl(mediaId: number) {
   return `/api/media/${mediaId}/thumbnail`;
 }
 
+export function getObservationExportUrl(observationId: number, includeIndicators: boolean) {
+  return `/api/observations/${observationId}/export?include_indicators=${includeIndicators}`;
+}
+
+export function getMonthlyExportUrl(year: number, month: number, includeIndicators: boolean) {
+  const params = new URLSearchParams({
+    year: String(year),
+    month: String(month),
+    include_indicators: String(includeIndicators),
+  });
+  return `/api/exports/monthly?${params.toString()}`;
+}
+
 export function useSubmitCapture() {
   const queryClient = useQueryClient();
   return useMutation({

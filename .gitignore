@@ -29,3 +29,6 @@ dist/
 # Temporary workspace content
 work/*
 !work/.gitkeep
+
+# Generated exports may contain child information; keep them local only
+outputs/*.docx

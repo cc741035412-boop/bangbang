@@ -1,10 +1,11 @@
-import { ArrowLeft, FileText, Image as ImageIcon, LoaderCircle, Pencil, X } from "lucide-react";
+import { ArrowLeft, Download, FileText, Image as ImageIcon, LoaderCircle, Pencil, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
 import { MobilePage } from "../components/mobile-page";
 import {
   getMediaFileUrl,
+  getObservationExportUrl,
   useObservation,
   type ObservationTag,
 } from "../features/observations/api";
@@ -28,6 +29,7 @@ export function ObservationDetailPage() {
   const observation = useObservation(id);
   const [previewMediaId, setPreviewMediaId] = useState<number | null>(null);
   const [failedImages, setFailedImages] = useState<Set<number>>(new Set());
+  const [includeIndicators, setIncludeIndicators] = useState(false);
   const record = observation.data;
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -59,7 +61,7 @@ export function ObservationDetailPage() {
 
   return (
     <MobilePage>
-      <article className="min-h-dvh bg-[#f5f2ea] pb-28">
+      <article className="min-h-dvh bg-[#f5f2ea] pb-48">
         <header className="border-b border-[#ddd7ca] bg-[#fffdf7] px-5 pb-7 pt-5">
           <Link
             aria-label="返回今日素材"
@@ -155,9 +157,27 @@ export function ObservationDetailPage() {
       </article>
 
       <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-[#f5f2ea]/95 px-5 pt-3">
-        <Link className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-brand text-lg font-bold text-white" to={`/observations/${id}/review`}>
-          <Pencil size={19} /> 继续编辑
-        </Link>
+        <label className="mb-2 flex min-h-8 items-center justify-end gap-2 text-sm text-ink-muted">
+          <input
+            checked={includeIndicators}
+            className="size-4 accent-brand"
+            onChange={(event) => setIncludeIndicators(event.target.checked)}
+            type="checkbox"
+          />
+          附带指标
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <Link className="flex min-h-14 items-center justify-center gap-2 rounded-2xl border border-brand bg-white font-bold text-brand-deep" to={`/observations/${id}/review`}>
+            <Pencil size={18} /> 继续编辑
+          </Link>
+          <a
+            className="flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-brand font-bold text-white"
+            download
+            href={getObservationExportUrl(id, includeIndicators)}
+          >
+            <Download size={18} /> 导出这条
+          </a>
+        </div>
       </div>
 
       {previewMedia && (

@@ -4,16 +4,19 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from docx import Document
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import main
+from export_service import academic_year_and_term
 from models import (
     AIRun,
     Area,
@@ -419,6 +422,170 @@ class ObservationStatusFlowTest(unittest.TestCase):
         }
         self.assertEqual(counts[self.child_id], 1)
         self.assertEqual(counts[self.second_child_id], 2)
+
+    def test_docx_export_structure_fields_indicators_and_monthly(self):
+        observed_at = datetime(2026, 8, 23, 17, 57, tzinfo=timezone.utc)
+        with Session(main.engine) as session:
+            observation = Observation(
+                child_id=self.child_id,
+                area_id=self.area_id,
+                classroom_id=1,
+                observer_id=1,
+                observed_at=observed_at,
+                age_group="middle",
+                status="confirmed",
+                location="楼顶建构区",
+                background_note="幼儿连续搭建第三天",
+                purpose="观察幼儿解决问题的过程",
+                narrative="1. 先放下长条积木。\n2. 调整间距后继续搭建。",
+                analysis="幼儿会根据结果调整计划。",
+                strategy="提供更多不同形状的材料。",
+            )
+            session.add(observation)
+            session.flush()
+            session.add_all([
+                ObservationChild(
+                    observation_id=observation.id,
+                    child_id=self.child_id,
+                    is_primary=True,
+                ),
+                ObservationChild(
+                    observation_id=observation.id,
+                    child_id=self.second_child_id,
+                    is_primary=False,
+                ),
+                ObservationTag(
+                    observation_id=observation.id,
+                    indicator_code="4.4",
+                    indicator_name="试误与问题解决",
+                    level=2,
+                    source="ai_suggested",
+                    accepted=True,
+                ),
+                ObservationTag(
+                    observation_id=observation.id,
+                    indicator_code="3.1",
+                    indicator_name="互动形式",
+                    level=3,
+                    source="ai_suggested",
+                    accepted=False,
+                ),
+                ObservationTag(
+                    observation_id=observation.id,
+                    indicator_code="1.2",
+                    indicator_name="身体探索方式",
+                    level=1,
+                    source="system_determined",
+                    accepted=True,
+                ),
+            ])
+            second_observation = Observation(
+                child_id=self.child_id,
+                area_id=self.area_id,
+                classroom_id=1,
+                observer_id=1,
+                observed_at=datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc),
+                age_group="middle",
+                status="confirmed",
+                narrative="第二条月度记录",
+            )
+            session.add(second_observation)
+            session.flush()
+            session.add(ObservationChild(
+                observation_id=second_observation.id,
+                child_id=self.child_id,
+                is_primary=True,
+            ))
+            session.commit()
+            observation_id = observation.id
+
+        exported = self.client.get(f"/observations/{observation_id}/export")
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(
+            exported.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertIn(
+            "%E8%A7%82%E5%AF%9F%E8%AE%B0%E5%BD%95_",
+            exported.headers["content-disposition"],
+        )
+        document = Document(BytesIO(exported.content))
+        self.assertEqual(len(document.tables), 1)
+        table = document.tables[0]
+        self.assertEqual(len(table.rows), 8)
+        self.assertEqual(len(table.columns), 4)
+        self.assertIs(table.cell(0, 0)._tc, table.cell(2, 0)._tc)
+        self.assertIs(table.cell(0, 2)._tc, table.cell(2, 2)._tc)
+        self.assertIs(table.cell(4, 1)._tc, table.cell(4, 3)._tc)
+        all_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        all_text += "\n" + "\n".join(cell.text for row in table.rows for cell in row.cells)
+        self.assertIn("自主游戏观察记录表", all_text)
+        self.assertIn("2025-2026学年度第二学期", all_text)
+        self.assertIn("姓名：测试幼儿A、测试幼儿B", all_text)
+        self.assertIn("年龄：5岁、中班", all_text)
+        self.assertIn("性别：女、男", all_text)
+        self.assertIn("观察地点：楼顶建构区", all_text)
+        self.assertIn("2026年8月24日", all_text)
+        self.assertIn("测试教师", all_text)
+        self.assertNotIn("【关联指标】", all_text)
+
+        with_indicators = self.client.get(
+            f"/observations/{observation_id}/export",
+            params={"include_indicators": "true"},
+        )
+        indicator_document = Document(BytesIO(with_indicators.content))
+        analysis_text = indicator_document.tables[0].cell(6, 1).text
+        self.assertIn("【关联指标】4.4 试误与问题解决·中阶；1.2 身体探索方式·初阶", analysis_text)
+        self.assertNotIn("3.1 互动形式", analysis_text)
+
+        monthly = self.client.get("/exports/monthly", params={"year": 2026, "month": 8})
+        self.assertEqual(monthly.status_code, 200)
+        monthly_document = Document(BytesIO(monthly.content))
+        self.assertEqual(len(monthly_document.tables), 2)
+        page_breaks = monthly_document._element.xpath('.//w:pageBreakBefore')
+        self.assertEqual(len(page_breaks), 1)
+
+        missing_month = self.client.get(
+            "/exports/monthly", params={"year": 2025, "month": 7}
+        )
+        self.assertEqual(missing_month.status_code, 404)
+        self.assertEqual(
+            missing_month.json()["detail"],
+            "2025年7月没有已确认的观察记录",
+        )
+
+        with Session(main.engine) as session:
+            unconfirmed = Observation(
+                area_id=self.area_id,
+                classroom_id=1,
+                observer_id=1,
+                age_group="middle",
+                status="ready_for_review",
+            )
+            session.add(unconfirmed)
+            session.commit()
+            unconfirmed_id = unconfirmed.id
+        rejected = self.client.get(f"/observations/{unconfirmed_id}/export")
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["detail"], "未确认的记录不能导出")
+
+    def test_academic_year_term_boundaries(self):
+        self.assertEqual(
+            academic_year_and_term(datetime(2025, 1, 10, tzinfo=timezone.utc)),
+            ("2024-2025学年度", "第一学期"),
+        )
+        self.assertEqual(
+            academic_year_and_term(datetime(2025, 2, 10, tzinfo=timezone.utc)),
+            ("2024-2025学年度", "第二学期"),
+        )
+        self.assertEqual(
+            academic_year_and_term(datetime(2025, 8, 10, tzinfo=timezone.utc)),
+            ("2024-2025学年度", "第二学期"),
+        )
+        self.assertEqual(
+            academic_year_and_term(datetime(2025, 9, 10, tzinfo=timezone.utc)),
+            ("2025-2026学年度", "第一学期"),
+        )
 
     def test_upload_limit_and_read_media_file(self):
         image_content = b"mock-image-content"
