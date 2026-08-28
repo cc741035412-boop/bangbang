@@ -208,6 +208,37 @@ class ObservationStatusFlowTest(unittest.TestCase):
         detail = self.client.get(f"/observations/{observation_id}").json()
         self.assertEqual(detail["child_confirmed_count"], 1)
 
+    def test_update_child_and_teacher_basic_information(self):
+        child_response = self.client.patch(
+            f"/children/{self.child_id}",
+            json={
+                "name": "幼儿A",
+                "birth_date": "2021-08-15",
+                "gender": "男",
+            },
+        )
+        self.assertEqual(child_response.status_code, 200)
+        self.assertEqual(child_response.json()["name"], "幼儿A")
+        self.assertEqual(child_response.json()["birth_date"], "2021-08-15")
+        self.assertEqual(child_response.json()["gender"], "男")
+
+        invalid_gender = self.client.patch(
+            f"/children/{self.child_id}",
+            json={"gender": "未知"},
+        )
+        self.assertEqual(invalid_gender.status_code, 422)
+        unchanged = self.client.get("/children").json()
+        saved_child = next(item for item in unchanged if item["id"] == self.child_id)
+        self.assertEqual(saved_child["gender"], "男")
+
+        teacher_response = self.client.patch(
+            "/teachers/1",
+            json={"name": "教师A"},
+        )
+        self.assertEqual(teacher_response.status_code, 200)
+        self.assertEqual(teacher_response.json()["name"], "教师A")
+        self.assertEqual(self.client.get("/teachers").json()[0]["name"], "教师A")
+
     def test_confirmation_requires_child_without_changing_age_snapshot(self):
         created = self.client.post("/observations", json={"area_id": self.area_id}).json()
         media = self.client.post(
@@ -538,12 +569,75 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertIn("【关联指标】4.4 试误与问题解决·中阶；1.2 身体探索方式·初阶", analysis_text)
         self.assertNotIn("3.1 互动形式", analysis_text)
 
+        markdown = self.client.get(
+            f"/observations/{observation_id}/export",
+            params={"include_indicators": "true", "format": "md"},
+        )
+        self.assertEqual(markdown.status_code, 200)
+        self.assertEqual(markdown.headers["content-type"], "text/markdown; charset=utf-8")
+        self.assertIn(".md", markdown.headers["content-disposition"])
+        markdown_text = markdown.content.decode("utf-8")
+        for expected in (
+            "# 测试幼儿A、测试幼儿B的观察记录",
+            "## 基本信息",
+            "幼儿：测试幼儿A、测试幼儿B",
+            "观察者：测试教师",
+            "## 观察目的",
+            "观察幼儿解决问题的过程",
+            "## 观察记录",
+            "1. 先放下长条积木。",
+            "## 观察分析",
+            "4.4 试误与问题解决·中阶",
+            "1.2 身体探索方式·初阶",
+            "## 下一步支持策略",
+            "提供更多不同形状的材料。",
+            "记录人：测试教师",
+        ):
+            self.assertIn(expected, markdown_text)
+        self.assertNotIn("3.1 互动形式", markdown_text)
+
+        pdf = self.client.get(
+            f"/observations/{observation_id}/export",
+            params={"include_indicators": "true", "format": "pdf"},
+        )
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf.headers["content-type"], "application/pdf")
+        self.assertIn(".pdf", pdf.headers["content-disposition"])
+        self.assertTrue(pdf.content.startswith(b"%PDF-"))
+
+        invalid_format = self.client.get(
+            f"/observations/{observation_id}/export",
+            params={"format": "txt"},
+        )
+        self.assertEqual(invalid_format.status_code, 422)
+        self.assertEqual(
+            invalid_format.json()["detail"],
+            "导出格式只支持 docx、pdf 或 md",
+        )
+
         monthly = self.client.get("/exports/monthly", params={"year": 2026, "month": 8})
         self.assertEqual(monthly.status_code, 200)
         monthly_document = Document(BytesIO(monthly.content))
         self.assertEqual(len(monthly_document.tables), 2)
         page_breaks = monthly_document._element.xpath('.//w:pageBreakBefore')
         self.assertEqual(len(page_breaks), 1)
+
+        monthly_pdf = self.client.get(
+            "/exports/monthly",
+            params={"year": 2026, "month": 8, "format": "pdf"},
+        )
+        self.assertEqual(monthly_pdf.status_code, 200)
+        self.assertTrue(monthly_pdf.content.startswith(b"%PDF-"))
+        monthly_markdown = self.client.get(
+            "/exports/monthly",
+            params={"year": 2026, "month": 8, "format": "md"},
+        )
+        self.assertEqual(monthly_markdown.status_code, 200)
+        markdown_titles = [
+            line for line in monthly_markdown.content.decode("utf-8").splitlines()
+            if line.startswith("# ")
+        ]
+        self.assertEqual(len(markdown_titles), 2)
 
         missing_month = self.client.get(
             "/exports/monthly", params={"year": 2025, "month": 7}
@@ -724,8 +818,36 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertIsNone(retried_media["thumbnail_failure_reason"])
 
     def test_deepseek_suggestions_are_validated_audited_and_linked(self):
+        self.assertEqual(
+            main.ai_service._anonymize_narrative(
+                "张小雨和小雨一起搭积木，李在旁边看",
+                ["小雨", "张小雨", "李"],
+            ),
+            "幼儿B和幼儿A一起搭积木，李在旁边看",
+        )
         observation_id = self.create_bound_observation()
         self.client.post(f"/observations/{observation_id}/narrative")
+        original_narrative = "张小雨坐在地垫上，李小明调整了间距后继续摆放"
+        with Session(main.engine) as session:
+            first_child = session.get(Child, self.child_id)
+            first_child.name = "李小明"
+            second_child = session.get(Child, self.second_child_id)
+            second_child.name = "张小雨"
+            old_primary = session.get(ObservationChild, (observation_id, self.child_id))
+            old_primary.is_primary = False
+            session.add(ObservationChild(
+                observation_id=observation_id,
+                child_id=self.second_child_id,
+                is_primary=True,
+            ))
+            observation = session.get(Observation, observation_id)
+            observation.child_id = self.second_child_id
+            observation.narrative = original_narrative
+            session.add(first_child)
+            session.add(second_child)
+            session.add(old_primary)
+            session.add(observation)
+            session.commit()
         model_content = {
             "suggestions": [
                 {
@@ -734,7 +856,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                     "level": 2,
                     "level_desc": "模型不能决定描述",
                     "confidence": 0.86,
-                    "reason": "白描原文写道：“调整了间距后继续摆放”",
+                    "reason": "白描原文写道：“幼儿A坐在地垫上”",
                     "evidence_based": True,
                     "rank": 9,
                 },
@@ -808,8 +930,9 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertTrue(body["suggestions"][0]["evidence_based"])
         self.assertEqual(
             body["suggestions"][0]["reason"],
-            "白描原文：“调整了间距后继续摆放”",
+            "白描原文：“幼儿A坐在地垫上”",
         )
+        self.assertEqual(body["suggestions"][0]["confidence"], 0.86)
         self.assertFalse(body["suggestions"][1]["evidence_based"])
         self.assertEqual(body["suggestions"][1]["confidence"], 0.42)
 
@@ -818,6 +941,10 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(request_body["temperature"], 1.0)
         self.assertEqual(request_body["response_format"], {"type": "json_object"})
         rendered = request_body["messages"][1]["content"]
+        self.assertNotIn("张小雨", rendered)
+        self.assertNotIn("李小明", rendered)
+        self.assertIn("幼儿A坐在地垫上", rendered)
+        self.assertIn("幼儿B调整了间距后继续摆放", rendered)
         self.assertIn('"indicator_code": "4.4"', rendered)
         self.assertNotIn('"indicator_code": "2.1"', rendered)
         self.assertIn("由系统按客观数据计算，不在你的判定范围内", rendered)
@@ -842,6 +969,10 @@ class ObservationStatusFlowTest(unittest.TestCase):
             self.assertEqual(run.prompt_version, "wf-b-v2")
             self.assertEqual(run.temperature, 1.0)
             self.assertEqual(run.token_usage["total_tokens"], 1380)
+            self.assertNotIn("张小雨", run.prompt_rendered)
+            self.assertNotIn("李小明", run.prompt_rendered)
+            self.assertIn("幼儿A坐在地垫上", run.prompt_rendered)
+            self.assertIn("幼儿B调整了间距后继续摆放", run.prompt_rendered)
             self.assertIn("2.1", run.error_reason)
             self.assertIn("quant_rule", run.error_reason)
             self.assertIn("原文引用无法", run.error_reason)
@@ -852,6 +983,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
             ).all()
             self.assertTrue(tags)
             self.assertTrue(all(tag.ai_run_id == run.id for tag in tags))
+            saved_observation = session.get(Observation, observation_id)
+            self.assertEqual(saved_observation.narrative, original_narrative)
 
     def test_deepseek_auth_failure_retries_once_and_falls_back(self):
         observation_id = self.create_bound_observation()

@@ -21,6 +21,10 @@ API_BASE_URL = os.getenv("BANGBANG_API_BASE_URL", f"http://127.0.0.1:{API_PORT}"
 UPLOAD_DIR = Path(os.getenv("BANGBANG_UPLOAD_DIR", "uploads"))
 SQL_ECHO = os.getenv("BANGBANG_SQL_ECHO", "false").strip().lower() == "true"
 
+RUNTIME_ENV = os.getenv("BANGBANG_ENV", "development").strip().lower()
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "").strip().lower()
+SMS_MOCK_CODE = os.getenv("SMS_MOCK_CODE", "123456").strip()
+
 AI_MODE = os.getenv("BANGBANG_AI_MODE", "mock").strip().lower()
 if AI_MODE not in {"mock", "deepseek"}:
     raise ValueError("BANGBANG_AI_MODE 只能是 mock 或 deepseek")

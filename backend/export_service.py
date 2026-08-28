@@ -1,8 +1,10 @@
-"""按园所固定 4 列 8 行模板生成观察记录 DOCX。"""
+"""从同一份观察记录数据生成 DOCX、PDF 和 Markdown。"""
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from html import escape
 from io import BytesIO
+from pathlib import Path
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -12,14 +14,38 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    KeepTogether,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from time_utils import ensure_utc
 
 
 KINDERGARTEN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PDF_MEDIA_TYPE = "application/pdf"
+MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8"
 LEVEL_LABELS = {1: "初阶", 2: "中阶", 3: "高阶"}
 FONT_NAME = "宋体"
+PDF_FONT_NAME = "BangbangCJK"
+PDF_FONT_CANDIDATES = (
+    Path("/System/Library/Fonts/STHeiti Medium.ttc"),
+    Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+    Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+)
 
 
 @dataclass
@@ -112,6 +138,244 @@ def indicator_text(indicators: List[ExportIndicator]) -> str:
         for item in indicators
     ]
     return f"【关联指标】{'；'.join(items)}" if items else ""
+
+
+def observation_title(record: ExportObservation) -> str:
+    return f"{child_names(record) or '未指定幼儿'}的观察记录"
+
+
+def observation_date(record: ExportObservation) -> str:
+    local = kindergarten_datetime(record.observed_at)
+    return f"{local.year}年{local.month}月{local.day}日"
+
+
+def indicator_lines(indicators: List[ExportIndicator]) -> List[str]:
+    return [
+        f"{item.code} {item.name}·{LEVEL_LABELS.get(item.level, f'第{item.level}阶')}"
+        for item in indicators
+    ]
+
+
+def build_observation_markdown(
+    records: List[ExportObservation],
+    *,
+    include_indicators: bool = False,
+) -> bytes:
+    """生成适合二次整理的 UTF-8 Markdown；多篇用分隔线分开。"""
+    documents = []
+    for record in records:
+        lines = [
+            f"# {observation_title(record)}",
+            "",
+            f"{observation_date(record)} · {record.area_name}",
+            "",
+            "## 基本信息",
+            "",
+            f"- 幼儿：{child_names(record)}",
+            f"- 年龄：{child_ages(record)}",
+            f"- 性别：{child_genders(record)}",
+            f"- 观察者：{record.observer_name}",
+            f"- 时间：{observation_date(record)}",
+            f"- 场景：{record.location or record.area_name}",
+        ]
+        if record.background_note:
+            lines.append(f"- 背景：{record.background_note}")
+        sections = (
+            ("观察目的", record.purpose),
+            ("观察记录", record.narrative),
+            ("观察分析", record.analysis),
+        )
+        for heading, content in sections:
+            lines.extend(["", f"## {heading}", "", content or ""])
+        if include_indicators and record.indicators:
+            lines.extend(["", "### 已采纳观察指标", ""])
+            lines.extend(f"- {item}" for item in indicator_lines(record.indicators))
+        lines.extend([
+            "",
+            "## 下一步支持策略",
+            "",
+            record.strategy or "",
+            "",
+            "---",
+            "",
+            f"记录人：{record.observer_name}",
+            "",
+            observation_date(record),
+        ])
+        documents.append("\n".join(lines).rstrip())
+    return ("\n\n---\n\n".join(documents) + "\n").encode("utf-8")
+
+
+def _pdf_paragraph_text(value: Optional[str]) -> str:
+    return escape(value or "").replace("\n", "<br/>")
+
+
+def _pdf_styles():
+    try:
+        pdfmetrics.getFont(PDF_FONT_NAME)
+    except KeyError:
+        font_path = next((path for path in PDF_FONT_CANDIDATES if path.is_file()), None)
+        if not font_path:
+            raise RuntimeError("找不到可嵌入的中文字体，无法生成 PDF")
+        pdfmetrics.registerFont(TTFont(PDF_FONT_NAME, str(font_path), subfontIndex=0))
+    styles = getSampleStyleSheet()
+    return {
+        "title": ParagraphStyle(
+            "BangbangTitle",
+            parent=styles["Title"],
+            fontName=PDF_FONT_NAME,
+            fontSize=19,
+            leading=27,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#225440"),
+            spaceAfter=8,
+        ),
+        "subtitle": ParagraphStyle(
+            "BangbangSubtitle",
+            parent=styles["Normal"],
+            fontName=PDF_FONT_NAME,
+            fontSize=10.5,
+            leading=16,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#676960"),
+            spaceAfter=16,
+        ),
+        "section": ParagraphStyle(
+            "BangbangSection",
+            parent=styles["Heading2"],
+            fontName=PDF_FONT_NAME,
+            fontSize=13,
+            leading=19,
+            textColor=colors.HexColor("#225440"),
+            spaceBefore=10,
+            spaceAfter=7,
+        ),
+        "body": ParagraphStyle(
+            "BangbangBody",
+            parent=styles["BodyText"],
+            fontName=PDF_FONT_NAME,
+            fontSize=10.5,
+            leading=18,
+            alignment=TA_LEFT,
+            textColor=colors.HexColor("#242520"),
+            spaceAfter=7,
+        ),
+        "label": ParagraphStyle(
+            "BangbangLabel",
+            parent=styles["BodyText"],
+            fontName=PDF_FONT_NAME,
+            fontSize=9.5,
+            leading=15,
+            textColor=colors.HexColor("#676960"),
+        ),
+        "signature": ParagraphStyle(
+            "BangbangSignature",
+            parent=styles["BodyText"],
+            fontName=PDF_FONT_NAME,
+            fontSize=9.5,
+            leading=16,
+            alignment=TA_RIGHT,
+            textColor=colors.HexColor("#676960"),
+        ),
+    }
+
+
+def _pdf_record_flowables(record: ExportObservation, include_indicators: bool, styles):
+    basics = [
+        ("幼儿", child_names(record)),
+        ("年龄", child_ages(record)),
+        ("性别", child_genders(record)),
+        ("观察者", record.observer_name),
+        ("时间", observation_date(record)),
+        ("场景", record.location or record.area_name),
+    ]
+    if record.background_note:
+        basics.append(("背景", record.background_note))
+    table_data = [
+        [
+            Paragraph(f"<b>{_pdf_paragraph_text(label)}</b>", styles["label"]),
+            Paragraph(_pdf_paragraph_text(value), styles["body"]),
+        ]
+        for label, value in basics
+    ]
+    info_table = Table(table_data, colWidths=[2.2 * cm, 13.6 * cm], hAlign="LEFT")
+    info_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F6F1")),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDD9CF")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E1D8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story = [
+        Paragraph(_pdf_paragraph_text(observation_title(record)), styles["title"]),
+        Paragraph(
+            _pdf_paragraph_text(f"{observation_date(record)} · {record.area_name}"),
+            styles["subtitle"],
+        ),
+        info_table,
+        Spacer(1, 8),
+    ]
+    for heading, content in (
+        ("观察目的", record.purpose),
+        ("观察记录", record.narrative),
+        ("观察分析", record.analysis),
+    ):
+        story.extend([
+            Paragraph(heading, styles["section"]),
+            Paragraph(_pdf_paragraph_text(content), styles["body"]),
+        ])
+    if include_indicators and record.indicators:
+        indicator_items = [
+            Paragraph(f"• {_pdf_paragraph_text(item)}", styles["body"])
+            for item in indicator_lines(record.indicators)
+        ]
+        story.append(KeepTogether([
+            Paragraph("已采纳观察指标", styles["section"]),
+            *indicator_items,
+        ]))
+    story.extend([
+        Paragraph("下一步支持策略", styles["section"]),
+        Paragraph(_pdf_paragraph_text(record.strategy), styles["body"]),
+        Spacer(1, 12),
+        Paragraph(
+            (
+                f"记录人：{_pdf_paragraph_text(record.observer_name)}"
+                f"<br/>{_pdf_paragraph_text(observation_date(record))}"
+            ),
+            styles["signature"],
+        ),
+    ])
+    return story
+
+
+def build_observation_pdf(
+    records: List[ExportObservation],
+    *,
+    include_indicators: bool = False,
+) -> bytes:
+    """生成固定排版 PDF；多篇记录每篇另起一页。"""
+    output = BytesIO()
+    styles = _pdf_styles()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=2 * cm,
+        leftMargin=2 * cm,
+        topMargin=1.8 * cm,
+        bottomMargin=1.8 * cm,
+        title="帮帮师记观察记录",
+        author="帮帮师记",
+    )
+    story = []
+    for index, record in enumerate(records):
+        if index:
+            story.append(PageBreak())
+        story.extend(_pdf_record_flowables(record, include_indicators, styles))
+    document.build(story)
+    return output.getvalue()
 
 
 def _set_font(run, *, size: float = 10.5, bold: bool = False):

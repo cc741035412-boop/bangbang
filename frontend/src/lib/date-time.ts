@@ -16,6 +16,12 @@ const KINDERGARTEN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   timeZone: KINDERGARTEN_TIME_ZONE,
 });
 
+const KINDERGARTEN_PLAIN_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  month: "long",
+  day: "numeric",
+  timeZone: KINDERGARTEN_TIME_ZONE,
+});
+
 const KINDERGARTEN_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
   month: "long",
@@ -57,8 +63,24 @@ export function formatKindergartenToday() {
 
 export function isKindergartenToday(value?: string | null) {
   if (!value) return false;
-  return KINDERGARTEN_DATE_KEY_FORMATTER.format(parseApiTimestamp(value))
-    === KINDERGARTEN_DATE_KEY_FORMATTER.format(new Date());
+  return getKindergartenDateKey(value) === getKindergartenDateKey(new Date());
+}
+
+export function formatKindergartenDate(value: string) {
+  return KINDERGARTEN_PLAIN_DATE_FORMATTER.format(parseApiTimestamp(value));
+}
+
+export function getKindergartenDateKey(value: string | Date) {
+  const parts = KINDERGARTEN_DATE_KEY_FORMATTER.formatToParts(typeof value === "string" ? parseApiTimestamp(value) : value);
+  const year = parts.find((part) => part.type === "year")?.value ?? "";
+  const month = parts.find((part) => part.type === "month")?.value ?? "";
+  const day = parts.find((part) => part.type === "day")?.value ?? "";
+  return `${year}-${month}-${day}`;
+}
+
+export function isKindergartenYearMonth(value: string | null | undefined, year: number, month: number) {
+  if (!value) return false;
+  return getKindergartenDateKey(value).startsWith(`${year}-${String(month).padStart(2, "0")}-`);
 }
 
 export function compareTimestampsDescending(a?: string | null, b?: string | null) {

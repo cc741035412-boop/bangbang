@@ -107,6 +107,36 @@ def generate_narrative(
 # 工作流 B：白描 + 区域 + 年龄段 → 候选指标
 # ============================================================
 
+def _child_alias(index: int) -> str:
+    """按 A..Z、AA.. 生成稳定的幼儿代号。"""
+    letters = ""
+    value = index + 1
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return f"幼儿{letters}"
+
+
+def _anonymize_narrative(narrative: str, child_names: List[str]) -> str:
+    """按调用方给定顺序精确替换班级已知姓名；单字姓名不处理。"""
+    anonymized = narrative
+    eligible_names = [name for name in child_names if len(name) >= 2]
+    replacements = [
+        (name, _child_alias(index), f"\ue000{index}\ue001")
+        for index, name in enumerate(eligible_names)
+    ]
+    # 先替换较长姓名，避免“张小雨 / 小雨”这类包含关系留下半个姓名；
+    # 代号仍严格按主幼儿优先、其余 id 顺序分配。
+    for name, _, placeholder in sorted(
+        replacements,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        anonymized = anonymized.replace(name, placeholder)
+    for _, alias, placeholder in replacements:
+        anonymized = anonymized.replace(placeholder, alias)
+    return anonymized
+
 def _hit_keywords(text: str, keywords: List[str]) -> int:
     """数一下白描里命中了几个关键词"""
     return sum(1 for k in keywords if k and k in text)
@@ -587,11 +617,13 @@ def suggest_indicators(
     duration_sec: Optional[int] = None,
     top_n: int = 3,
     area_name: Optional[str] = None,
+    child_names: Optional[List[str]] = None,
 ) -> Dict:
     """按配置执行工作流 B；DeepSeek 失败时永远降级而不向上抛错。"""
+    sanitized_narrative = _anonymize_narrative(narrative, child_names or [])
     if AI_MODE == "deepseek":
         return _deepseek_or_fallback(
-            narrative=narrative,
+            narrative=sanitized_narrative,
             area_code=area_code,
             area_name=area_name or area_code,
             age_group=age_group,
@@ -602,7 +634,7 @@ def suggest_indicators(
     started_at = utc_now()
     started_clock = perf_counter()
     result = _suggest_indicators_mock(
-        narrative=narrative,
+        narrative=sanitized_narrative,
         area_code=area_code,
         age_group=age_group,
         duration_sec=duration_sec,

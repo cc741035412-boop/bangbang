@@ -1,6 +1,6 @@
-import { ArrowLeft, LoaderCircle, RotateCcw, Sparkles } from "lucide-react";
+import { ArrowLeft, LoaderCircle, Play, RotateCcw, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { CandidateIndicators } from "../components/candidate-indicators";
 import { MediaThumbnail } from "../components/media-thumbnail";
@@ -15,6 +15,7 @@ import {
   useObservation,
   useSuggestTags,
   useUpdateObservation,
+  getMediaFileUrl,
 } from "../features/observations/api";
 import { formatKindergartenTime } from "../lib/date-time";
 
@@ -39,6 +40,13 @@ const EMPTY_FIELDS: EditableFields = {
   strategy: "",
 };
 
+function formatDuration(duration?: number | null) {
+  if (!duration) return null;
+  const minutes = Math.floor(duration / 60);
+  const seconds = String(duration % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 export function ObservationReviewPage() {
   const { observationId } = useParams();
   const id = Number(observationId);
@@ -55,6 +63,8 @@ export function ObservationReviewPage() {
   const [fields, setFields] = useState<EditableFields>(EMPTY_FIELDS);
   const fieldsRef = useRef(fields);
   const [showConfirmPrompt, setShowConfirmPrompt] = useState(false);
+  const [editingPurpose, setEditingPurpose] = useState(false);
+  const [editingNarrative, setEditingNarrative] = useState(false);
   const initializedKey = useRef("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const analysisRef = useRef<HTMLTextAreaElement | null>(null);
@@ -68,6 +78,7 @@ export function ObservationReviewPage() {
     (children.data ?? []).filter((child) => child.classroom_id === record?.classroom_id)
   ), [children.data, record?.classroom_id]);
   const acceptedTags = record?.tags.filter((tag) => tag.accepted === true) ?? [];
+  const selectedChild = classroomChildren.find((child) => child.id === record?.child_id);
 
   useEffect(() => {
     if (!record || !["ready_for_review", "confirmed"].includes(record.status)) return;
@@ -131,7 +142,7 @@ export function ObservationReviewPage() {
     try {
       await updateObservation.mutateAsync(fieldsRef.current);
       await confirmation.mutateAsync();
-      navigate("/", { replace: true });
+      navigate(`/observations/${id}`, { replace: true });
     } catch {
       // 对应错误由页面状态展示，保留全部输入供教师直接重试。
     }
@@ -188,14 +199,22 @@ export function ObservationReviewPage() {
 
   const media = record.media[0];
   const isConfirmedEditing = record.status === "confirmed";
+  const childLabel = selectedChild?.name ?? record.child_name ?? "未选择幼儿";
+  const durationLabel = formatDuration(media?.duration_sec);
+  const materialType = record.media_type === "video" ? "视频素材" : "照片素材";
+  const autosaveText = updateObservation.isPending
+    ? "保存中…"
+    : updateObservation.isError
+      ? "保存失败"
+      : "已自动保存";
 
   return (
     <MobilePage>
-      <div className="px-5 pb-28 pt-5">
-        <header className="mb-5 flex items-center gap-3">
+      <div className="px-4 pb-36 pt-4 sm:px-5">
+        <header className="mb-4 grid grid-cols-[44px_1fr_76px] items-center">
           <Link
             aria-label={isConfirmedEditing ? "返回观察记录详情" : "返回今日素材"}
-            className="grid size-11 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-sm"
+            className="grid size-11 place-items-center text-ink-muted"
             onClick={(event) => {
               if (isConfirmedEditing) {
                 event.preventDefault();
@@ -206,36 +225,48 @@ export function ObservationReviewPage() {
             }}
             to={isConfirmedEditing ? `/observations/${id}` : "/"}
           >
-            <ArrowLeft size={22} />
+            <ArrowLeft size={20} />
           </Link>
-          <h1 className="text-2xl font-bold tracking-[-0.02em]">{isConfirmedEditing ? "继续编辑" : "整理这条记录"}</h1>
+          <h1 className="text-center text-xl font-bold tracking-[-0.02em]">
+            {isConfirmedEditing ? "观察记录 · 继续编辑" : "草稿 · 观察记录"}
+          </h1>
+          <p className={`text-right text-xs ${updateObservation.isError ? "text-red-700" : "text-ink-muted"}`} role="status">
+            {autosaveText}
+          </p>
         </header>
 
-        <section className="mb-6 overflow-hidden rounded-3xl bg-surface shadow-sm">
-          <MediaThumbnail
-            className="aspect-[16/9] w-full"
-            media={media}
-            mediaType={record.media_type}
-          />
-          <div className="px-4 py-4">
-            <p className="font-bold">{record.area_name ?? "未知区域"}</p>
-            <p className="mt-1 text-sm text-ink-muted">
-              {formatKindergartenTime(record.created_at ?? record.observed_at)}
-            </p>
+        <section className="mb-5 flex items-center gap-3 rounded-2xl border border-stone-200 bg-white p-3.5 shadow-sm">
+          <a className="relative block size-[76px] shrink-0 overflow-hidden rounded-xl" href={media ? getMediaFileUrl(media.id) : undefined} target="_blank">
+            <MediaThumbnail className="size-full" media={media} mediaType={record.media_type} />
+            {record.media_type === "video" && (
+              <span className="absolute inset-0 grid place-items-center bg-black/10 text-white"><Play fill="currentColor" size={23} /></span>
+            )}
+            {durationLabel && <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">{durationLabel}</span>}
+          </a>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[15px] font-bold">{record.area_name ?? "观察素材"} · {materialType}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span className="rounded-full bg-brand-soft px-2.5 py-1 text-xs font-bold text-brand-deep">{childLabel}</span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs text-ink-muted">{record.area_name ?? "未知区域"}</span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs text-ink-muted">{formatKindergartenTime(record.created_at ?? record.observed_at)}</span>
+            </div>
+            <p className="mt-2 text-xs font-medium text-brand">● 素材已保存 · 可回看原素材</p>
           </div>
         </section>
 
         {record.status === "ready_for_review" && (
-          <section className="mb-7 rounded-3xl bg-surface p-5 shadow-sm" aria-labelledby="child-heading">
-            <h2 className="text-lg font-bold" id="child-heading">这条记录是关于谁的</h2>
-            <p className="mt-1 text-sm text-ink-muted">只显示{record.classroom_name ?? "当前班级"}的幼儿，单选</p>
-            {children.isLoading && <p className="mt-4 text-sm text-ink-muted">正在加载幼儿名单…</p>}
-            {children.isError && <p className="mt-4 text-sm text-red-700">幼儿名单暂时没有加载成功</p>}
-            <div className="mt-4 flex gap-2 overflow-x-auto pb-1" role="radiogroup" aria-label="选择幼儿">
+          <section className="mb-5" aria-labelledby="child-heading">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-sm font-bold" id="child-heading">观察对象</h2>
+              <p className="text-xs text-ink-muted">{record.classroom_name ?? "当前班级"} · 单选</p>
+            </div>
+            {children.isLoading && <p className="text-sm text-ink-muted">正在加载幼儿信息…</p>}
+            {children.isError && <p className="text-sm text-red-700">幼儿信息加载失败</p>}
+            <div className="flex gap-2 overflow-x-auto pb-1" role="radiogroup" aria-label="选择幼儿">
               {classroomChildren.map((child) => (
                 <button
                   aria-checked={record.child_id === child.id}
-                  className={`min-h-11 shrink-0 rounded-full border px-4 text-sm font-bold ${record.child_id === child.id ? "border-brand bg-brand text-white" : "border-stone-300 bg-white text-stone-700"}`}
+                  className={`min-h-10 shrink-0 rounded-full border px-4 text-sm font-bold ${record.child_id === child.id ? "border-brand bg-brand text-white" : "border-stone-300 bg-white text-stone-700"}`}
                   disabled={updateObservation.isPending && updateObservation.variables?.child_id === child.id}
                   key={child.id}
                   onClick={() => updateObservation.mutate({ child_id: child.id })}
@@ -250,7 +281,7 @@ export function ObservationReviewPage() {
         )}
 
         {record.status === "uploaded" && (
-          <section className="rounded-3xl bg-surface p-5 shadow-sm">
+          <section className="rounded-2xl bg-white p-5 shadow-sm">
             <h2 className="text-lg font-bold">素材已经存好了</h2>
             <p className="mt-2 text-sm leading-6 text-ink-muted">让 AI 先把画面里的行为整理成客观白描。</p>
             <button
@@ -265,7 +296,7 @@ export function ObservationReviewPage() {
         )}
 
         {record.status === "processing" && (
-          <section className="flex min-h-64 flex-col items-center justify-center rounded-3xl bg-surface px-6 text-center shadow-sm">
+          <section className="flex min-h-64 flex-col items-center justify-center rounded-2xl bg-white px-6 text-center shadow-sm">
             <LoaderCircle aria-hidden className="animate-spin text-brand" size={36} />
             <h2 className="mt-5 text-xl font-bold">正在整理…</h2>
             <p className="mt-2 text-sm leading-6 text-ink-muted">可以先返回首页，稍后再点进来看。</p>
@@ -273,112 +304,107 @@ export function ObservationReviewPage() {
           </section>
         )}
 
-        {record.status === "ready_for_review" && !showIndicators && (
-          <section>
-            <label className="block text-sm font-bold text-ink-muted" htmlFor="narrative">
-              AI 生成的客观白描，请核对后修改
-            </label>
-            <textarea
-              className="mt-3 min-h-72 w-full resize-y rounded-3xl border border-stone-200 bg-surface p-4 text-base leading-7 outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-              id="narrative"
-              onBlur={flushFields}
-              onChange={(event) => changeField("narrative", event.target.value)}
-              value={fields.narrative}
-            />
-            <div className="mt-2 min-h-5 text-xs text-ink-muted" role="status">
-              {updateObservation.isPending && "正在自动保存…"}
-              {updateObservation.isSuccess && !updateObservation.isPending && "已自动保存"}
-              {updateObservation.isError && "暂时没有保存成功，继续修改或离开输入框会重试"}
-            </div>
-            {isMock && (
-              <p className="mt-3 text-xs leading-5 text-stone-500">⚠️ 当前为演示数据，尚未接入真实 AI</p>
-            )}
-          </section>
-        )}
-
-        {["ready_for_review", "confirmed"].includes(record.status) && showIndicators && (
-          <div className="space-y-8">
-            <section aria-labelledby="purpose-heading">
-              <label className="block text-base font-bold" htmlFor="purpose" id="purpose-heading">观察目的</label>
-              <p className="mt-1 text-sm text-ink-muted">由你填写，AI 不生成</p>
-              <textarea
-                className="mt-3 min-h-28 w-full resize-y rounded-3xl border border-stone-200 bg-surface p-4 text-base leading-7 outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                id="purpose"
-                onBlur={flushFields}
-                onChange={(event) => changeField("purpose", event.target.value)}
-                placeholder="这次观察想了解什么？"
-                value={fields.purpose}
-              />
-            </section>
-
-            <section aria-labelledby="narrative-heading">
-              <label className="block text-base font-bold" htmlFor="narrative" id="narrative-heading">客观白描</label>
-              <p className="mt-1 text-sm text-ink-muted">AI 主笔，请核对事实后修改</p>
-              <textarea
-                className="mt-3 min-h-56 w-full resize-y rounded-3xl border border-stone-200 bg-surface p-4 text-base leading-7 outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                id="narrative"
-                onBlur={flushFields}
-                onChange={(event) => changeField("narrative", event.target.value)}
-                value={fields.narrative}
-              />
-              {isMock && <p className="mt-2 text-xs text-stone-500">⚠️ 当前为演示数据，尚未接入真实 AI</p>}
-            </section>
-
-            <CandidateIndicators
-              addingTeacherTag={addTeacherTag.isPending}
-              indicatorOptions={indicators.data ?? []}
-              onAddTeacherTag={async (indicatorCode, level) => {
-                await addTeacherTag.mutateAsync({ indicatorCode, level });
-              }}
-              onDecide={(tagId, accepted) => decideTag.mutate({ tagId, accepted })}
-              tags={record.tags}
-            />
-
-            <section aria-labelledby="analysis-heading">
-              <label className="block text-base font-bold" htmlFor="analysis" id="analysis-heading">分析</label>
-              <p className="mt-1 text-sm text-ink-muted">由你判断和书写，AI 不代写</p>
-              {acceptedTags.length > 0 && (
-                <div className="mt-3 rounded-2xl bg-stone-100 p-3">
-                  <p className="text-xs font-bold text-stone-500">已采纳指标，仅供参考</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {acceptedTags.map((tag) => (
-                      <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-stone-700" key={tag.id}>
-                        {tag.indicator_code} {tag.indicator_name} · {tag.level === 1 ? "初阶" : tag.level === 2 ? "中阶" : "高阶"}
-                      </span>
-                    ))}
+        {["ready_for_review", "confirmed"].includes(record.status) && (
+          <div>
+            <SectionHeading hint="教师填写" title="观察目的" />
+            <section className="rounded-2xl border border-stone-200 bg-white p-4">
+              {editingPurpose ? (
+                <>
+                  <textarea
+                    autoFocus
+                    className="min-h-24 w-full resize-y rounded-xl border border-brand/30 bg-stone-50 p-3 text-sm leading-6 outline-none focus:border-brand"
+                    id="purpose"
+                    onBlur={flushFields}
+                    onChange={(event) => changeField("purpose", event.target.value)}
+                    placeholder="这次观察想了解什么？"
+                    value={fields.purpose}
+                  />
+                  <div className="mt-3 flex justify-end">
+                    <button className="min-h-9 rounded-full bg-brand px-4 text-xs font-bold text-white" onClick={() => { flushFields(); setEditingPurpose(false); }} type="button">完成</button>
                   </div>
+                </>
+              ) : (
+                <div className="flex items-start justify-between gap-3">
+                  <p className={`text-sm leading-7 ${fields.purpose ? "text-ink" : "text-stone-400"}`}>{fields.purpose || "还没有填写观察目的"}</p>
+                  <button className="min-h-9 shrink-0 rounded-full border border-dashed border-brand/30 px-3 text-xs font-bold text-brand" onClick={() => setEditingPurpose(true)} type="button">+ 修改</button>
                 </div>
               )}
-              <textarea
-                className="mt-3 min-h-40 w-full resize-y rounded-3xl border border-stone-200 bg-surface p-4 text-base leading-7 outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                id="analysis"
-                onBlur={flushFields}
-                onChange={(event) => changeField("analysis", event.target.value)}
-                placeholder="结合观察到的行为，写下你的专业判断"
-                ref={analysisRef}
-                value={fields.analysis}
-              />
             </section>
 
-            <section aria-labelledby="strategy-heading">
-              <label className="block text-base font-bold" htmlFor="strategy" id="strategy-heading">措施</label>
-              <p className="mt-1 text-sm text-ink-muted">完全由你填写，保留教师最重要的专业判断</p>
-              <textarea
-                className="mt-3 min-h-40 w-full resize-y rounded-3xl border border-stone-200 bg-surface p-4 text-base leading-7 outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                id="strategy"
-                onBlur={flushFields}
-                onChange={(event) => changeField("strategy", event.target.value)}
-                placeholder="下一步准备提供什么材料、提问或支持？"
-                ref={strategyRef}
-                value={fields.strategy}
-              />
+            <SectionHeading hint="AI 草拟 · 可直接改" title="白描记录" />
+            <section className="rounded-2xl border border-stone-200 bg-white p-4">
+              {editingNarrative ? (
+                <textarea
+                  autoFocus
+                  className="min-h-56 w-full resize-y rounded-xl border border-brand/30 bg-stone-50 p-3 text-sm leading-7 outline-none focus:border-brand"
+                  id="narrative"
+                  onBlur={flushFields}
+                  onChange={(event) => changeField("narrative", event.target.value)}
+                  value={fields.narrative}
+                />
+              ) : (
+                <p className="whitespace-pre-wrap text-[15px] leading-8">{fields.narrative}</p>
+              )}
+              <div className="mt-3 flex items-center justify-between gap-3 border-t border-dashed border-stone-200 pt-3">
+                <span className="text-xs text-ink-muted">{record.narrative_source === "ai_edited" ? "你已改写这一段" : "请结合原素材核对事实"}</span>
+                <button
+                  className={`min-h-9 shrink-0 rounded-full border px-3 text-xs font-bold ${editingNarrative ? "border-brand bg-brand text-white" : "border-brand/30 text-brand"}`}
+                  onClick={() => { if (editingNarrative) flushFields(); setEditingNarrative((value) => !value); }}
+                  type="button"
+                >
+                  {editingNarrative ? "改好了" : "这段不像我看到的"}
+                </button>
+              </div>
+              {isMock && <MockNarrativeNotice className="mt-2 text-xs text-stone-500" />}
             </section>
 
-            <div className="min-h-5 text-xs text-ink-muted" role="status">
-              {updateObservation.isPending && "正在保存修改…"}
-              {updateObservation.isSuccess && !updateObservation.isPending && "修改已保存"}
-              {updateObservation.isError && "修改暂时没有保存成功，请继续编辑后重试"}
-            </div>
+            {showIndicators && (
+              <>
+                <SectionHeading hint="逐条判断" title="指标推荐" />
+                <CandidateIndicators
+                  addingTeacherTag={addTeacherTag.isPending}
+                  indicatorOptions={indicators.data ?? []}
+                  onAddTeacherTag={async (indicatorCode, level) => {
+                    await addTeacherTag.mutateAsync({ indicatorCode, level });
+                  }}
+                  onDecide={(tagId, accepted) => decideTag.mutate({ tagId, accepted })}
+                  tags={record.tags}
+                />
+
+                <SectionHeading hint="写给家长看的判断" title="我的分析" />
+                <section className="rounded-2xl border border-stone-200 bg-white p-4">
+                  {acceptedTags.length > 0 && (
+                    <div className="mb-3 flex flex-wrap gap-1.5">
+                      {acceptedTags.map((tag) => (
+                        <span className="rounded-full bg-brand-soft px-2.5 py-1 text-[11px] font-bold text-brand-deep" key={tag.id}>{tag.indicator_name}</span>
+                      ))}
+                    </div>
+                  )}
+                  <textarea
+                    className="min-h-28 w-full resize-y rounded-xl border border-stone-200 bg-stone-50 p-3 text-sm leading-7 outline-none focus:border-brand"
+                    id="analysis"
+                    onBlur={flushFields}
+                    onChange={(event) => changeField("analysis", event.target.value)}
+                    placeholder="结合观察到的行为，写下你的专业判断（选填）"
+                    ref={analysisRef}
+                    value={fields.analysis}
+                  />
+                </section>
+
+                <SectionHeading hint="你来写" title="下一步支持策略" />
+                <section className="rounded-2xl border border-stone-200 bg-white p-4">
+                  <textarea
+                    className="min-h-28 w-full resize-y rounded-xl border border-stone-200 bg-stone-50 p-3 text-sm leading-7 outline-none focus:border-brand"
+                    id="strategy"
+                    onBlur={flushFields}
+                    onChange={(event) => changeField("strategy", event.target.value)}
+                    placeholder="下一步准备提供什么材料、提问或支持？"
+                    ref={strategyRef}
+                    value={fields.strategy}
+                  />
+                </section>
+              </>
+            )}
           </div>
         )}
 
@@ -415,42 +441,47 @@ export function ObservationReviewPage() {
       </div>
 
       {record.status === "ready_for_review" && !showIndicators && (
-        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
+        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200 bg-canvas/95 px-4 pt-3 backdrop-blur">
           <button
-            className="min-h-14 w-full rounded-2xl bg-brand text-lg font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            className="min-h-14 w-full rounded-2xl bg-brand text-base font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
             disabled={!fields.narrative.trim() || updateObservation.isPending || suggestTags.isPending}
             onClick={() => void continueToIndicators()}
             type="button"
           >
-            {suggestTags.isPending ? "正在生成候选…" : "下一步"}
+            {suggestTags.isPending ? "正在生成候选…" : "生成候选指标"}
           </button>
+          <p className="mt-2 text-center text-xs text-ink-muted">白描会先自动保存，再用于生成候选</p>
         </div>
       )}
 
       {record.status === "ready_for_review" && showIndicators && (
-        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
+        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200 bg-canvas/95 px-4 pt-3 backdrop-blur">
           {record.child_id == null && (
             <p className="mb-2 text-center text-sm font-medium text-amber-700">请先选择这条记录关于哪位幼儿</p>
           )}
+          {record.child_id != null && acceptedTags.length === 0 && (
+            <p className="mb-2 text-center text-sm font-medium text-amber-700">请至少采纳一个指标</p>
+          )}
           <button
-            className="min-h-14 w-full rounded-2xl bg-brand text-lg font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
-            disabled={record.child_id == null || confirmation.isPending}
+            className="min-h-14 w-full rounded-2xl bg-brand text-base font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            disabled={record.child_id == null || acceptedTags.length === 0 || confirmation.isPending}
             onClick={requestConfirmation}
             type="button"
           >
-            {confirmation.isPending ? "正在确认…" : "确认完成"}
+            {confirmation.isPending ? "正在生成完整稿…" : "保存并生成完整稿"}
           </button>
+          <p className="mt-2 text-center text-xs text-ink-muted">生成后进入完整记录，仍可继续修改</p>
         </div>
       )}
 
       {record.status === "confirmed" && showIndicators && (
-        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
+        <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200 bg-canvas/95 px-4 pt-3 backdrop-blur">
           <button
-            className="min-h-14 w-full rounded-2xl bg-brand text-lg font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
+            className="min-h-14 w-full rounded-2xl bg-brand text-base font-bold text-white disabled:bg-stone-200 disabled:text-stone-400"
             onClick={() => void saveAndReturnToDetail()}
             type="button"
           >
-            保存并返回详情
+            保存并返回完整稿
           </button>
         </div>
       )}
@@ -478,6 +509,22 @@ export function ObservationReviewPage() {
       )}
     </MobilePage>
   );
+}
+
+function SectionHeading({ hint, title }: { hint: string; title: string }) {
+  return (
+    <div className="mb-2 mt-6 flex items-center gap-2 px-0.5">
+      <span aria-hidden className="h-4 w-1 rounded-full bg-brand" />
+      <h2 className="text-lg font-bold">{title}</h2>
+      <span className="ml-auto text-xs text-ink-muted">{hint}</span>
+    </div>
+  );
+}
+
+export function MockNarrativeNotice({ className }: { className: string }) {
+  const [searchParams] = useSearchParams();
+  if (searchParams.get("demo") === "1") return null;
+  return <p className={className}>⚠️ 当前为演示数据，尚未接入真实 AI</p>;
 }
 
 function ReviewMessage({ children, loading = false, title }: { children?: ReactNode; loading?: boolean; title: string }) {

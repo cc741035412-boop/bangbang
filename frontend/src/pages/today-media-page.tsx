@@ -1,182 +1,73 @@
-import { Download, Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
-import { useMemo, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
+import { Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
+import { useMemo } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import { MediaThumbnail } from "../components/media-thumbnail";
+import { HomeTabBar } from "../components/home-tab-bar";
+import { MaterialCard } from "../components/material-card";
 import { MobilePage } from "../components/mobile-page";
-import { getMonthlyExportUrl, useTodayMediaData } from "../features/observations/api";
-import { OBSERVATION_STATUS_META } from "../features/observations/observation-status";
-import {
-  compareTimestampsDescending,
-  formatKindergartenTime,
-  formatKindergartenToday,
-  getKindergartenYearMonth,
-  isKindergartenToday,
-} from "../lib/date-time";
+import { UploadSheet } from "../components/upload-sheet";
+import { useTodayMediaData } from "../features/observations/api";
+import { compareTimestampsDescending, formatKindergartenToday, isKindergartenToday } from "../lib/date-time";
 
 interface SuccessState { captureDuration?: number }
 
 export function TodayMediaPage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const successState = location.state as SuccessState | null;
-  const [onlyNeedsReview, setOnlyNeedsReview] = useState(false);
-  const [includeIndicators, setIncludeIndicators] = useState(false);
   const { observations, areas, children, media } = useTodayMediaData();
-
-  const areaNames = useMemo(
-    () => new Map((areas.data ?? []).map((area) => [area.id, area.name])),
-    [areas.data],
-  );
-  const childNames = useMemo(
-    () => new Map((children.data ?? []).map((child) => [child.id, child.name])),
-    [children.data],
-  );
-  const mediaByObservation = useMemo(
-    () => new Map(
-      (media.data ?? [])
-        .filter((item) => item.observation_id != null)
-        .map((item) => [item.observation_id as number, item]),
-    ),
-    [media.data],
-  );
+  const areaNames = useMemo(() => new Map((areas.data ?? []).map((area) => [area.id, area.name])), [areas.data]);
+  const childNames = useMemo(() => new Map((children.data ?? []).map((child) => [child.id, child.name])), [children.data]);
+  const mediaByObservation = useMemo(() => new Map((media.data ?? []).filter((item) => item.observation_id != null).map((item) => [item.observation_id as number, item])), [media.data]);
   const todayRecords = useMemo(() => (
     (observations.data ?? [])
-      .filter((item) => isKindergartenToday(item.created_at))
-      .sort((a, b) => compareTimestampsDescending(a.created_at, b.created_at))
+      .filter((item) => isKindergartenToday(item.created_at ?? item.observed_at))
+      .sort((a, b) => compareTimestampsDescending(a.created_at ?? a.observed_at, b.created_at ?? b.observed_at))
   ), [observations.data]);
-  const readyCount = todayRecords.filter((item) => item.status === "ready_for_review").length;
-  const visibleRecords = onlyNeedsReview
-    ? todayRecords.filter((item) => item.status === "ready_for_review")
-    : todayRecords;
   const isLoading = observations.isLoading || areas.isLoading || children.isLoading || media.isLoading;
   const hasError = observations.isError || areas.isError || children.isError || media.isError;
-  const currentMonth = getKindergartenYearMonth();
+  const uploadOpen = searchParams.get("upload") === "1";
+
+  function closeUpload() {
+    setSearchParams({}, { replace: true });
+  }
 
   return (
     <MobilePage>
-      <div className="px-5 pb-32 pt-7">
-        <header className="mb-6 flex items-end justify-between gap-4">
-          <div>
-            <p className="mb-1 text-sm font-medium text-ink-muted">{formatKindergartenToday()}</p>
-            <h1 className="text-[30px] font-bold tracking-[-0.03em]">今日素材</h1>
-          </div>
-          {readyCount > 0 && (
-            <button
-              aria-pressed={onlyNeedsReview}
-              className={`min-h-11 rounded-full px-4 text-sm font-bold ${
-                onlyNeedsReview ? "bg-orange-600 text-white" : "bg-orange-100 text-orange-700"
-              }`}
-              onClick={() => setOnlyNeedsReview((value) => !value)}
-              type="button"
-            >
-              {readyCount} 条待确认
-            </button>
-          )}
+      <div className="min-h-dvh bg-[#f7f6f1] px-4 pb-28 pt-9">
+        <header>
+          <h1 className="text-[34px] font-bold tracking-[-0.04em]">今日素材</h1>
+          <p className="mt-2 text-base text-[#8b9994]">{formatKindergartenToday()} · 今天拍的都在这里</p>
         </header>
 
-        <section className="mb-5 rounded-2xl border border-brand/15 bg-surface p-3" aria-label="月度导出">
-          <a
-            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand-soft px-4 font-bold text-brand-deep"
-            download
-            href={getMonthlyExportUrl(currentMonth.year, currentMonth.month, includeIndicators)}
-          >
-            <Download aria-hidden size={18} /> 导出本月
-          </a>
-          <label className="mt-2 flex min-h-10 items-center justify-center gap-2 text-sm text-ink-muted">
-            <input
-              checked={includeIndicators}
-              className="size-4 accent-brand"
-              onChange={(event) => setIncludeIndicators(event.target.checked)}
-              type="checkbox"
-            />
-            附带指标
-          </label>
-        </section>
+        <button className="mt-5 flex min-h-16 w-full items-center justify-center gap-2 rounded-2xl bg-brand text-xl font-bold text-white shadow-[0_10px_25px_rgba(49,116,90,0.20)]" onClick={() => setSearchParams({ upload: "1" })} type="button">
+          <Plus aria-hidden size={25} /> 上传素材
+        </button>
 
         {successState?.captureDuration != null && (
-          <button
-            className="mb-5 w-full rounded-2xl bg-brand-soft px-4 py-3 text-left text-sm font-medium text-brand-deep"
-            onClick={() => navigate(location.pathname, { replace: true, state: null })}
-            type="button"
-          >
-            已存下，稍后整理 · 用时 {Math.round(successState.captureDuration)} 秒
+          <button className="mt-4 w-full rounded-xl bg-brand-soft px-4 py-3 text-left text-sm text-brand-deep" onClick={() => navigate(location.pathname, { replace: true, state: null })} type="button">
+            已上传，稍后可以继续整理 · 用时 {Math.round(successState.captureDuration)} 秒
           </button>
         )}
 
-        {isLoading && <p className="py-20 text-center text-sm text-ink-muted">正在看看今天的素材…</p>}
-        {hasError && (
-          <button
-            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 text-sm font-medium text-red-700"
-            onClick={() => void observations.refetch()}
-            type="button"
-          >
-            <RotateCcw size={16} /> 加载失败，点这里重试
-          </button>
-        )}
-
-        {!isLoading && !hasError && visibleRecords.length === 0 && (
-          <section className="flex min-h-[52vh] flex-col items-center justify-center px-8 text-center">
-            <div className="mb-5 grid size-20 place-items-center rounded-[28px] bg-surface text-brand shadow-sm">
-              <ImageIcon aria-hidden size={34} strokeWidth={1.7} />
-            </div>
-            <h2 className="text-lg font-bold">
-              {onlyNeedsReview ? "今天没有待确认素材" : "今天还没有素材"}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-ink-muted">
-              {onlyNeedsReview ? "全部素材都处理好了" : "点下面的按钮开始记录"}
-            </p>
+        <div className="mt-5">
+          {isLoading && <p className="py-20 text-center text-sm text-ink-muted">正在看看今天的素材…</p>}
+          {hasError && <button className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 text-sm font-medium text-red-700" onClick={() => void observations.refetch()} type="button"><RotateCcw size={16} /> 加载失败，点这里重试</button>}
+          {!isLoading && !hasError && todayRecords.length === 0 && (
+            <section className="flex min-h-[48vh] flex-col items-center justify-center text-center">
+              <div className="grid size-20 place-items-center rounded-[26px] bg-white text-brand shadow-sm"><ImageIcon aria-hidden size={34} /></div>
+              <h2 className="mt-5 text-lg font-bold">今天还没有素材</h2>
+              <p className="mt-2 text-sm text-ink-muted">拍完就点上面的按钮传上来</p>
+            </section>
+          )}
+          <section aria-label="今日素材列表" className="space-y-3">
+            {todayRecords.map((record) => <MaterialCard areaName={areaNames.get(record.area_id) ?? "未知区域"} childName={record.child_id == null ? "未指定幼儿" : childNames.get(record.child_id) ?? "幼儿信息待同步"} key={record.id} media={mediaByObservation.get(record.id)} record={record} />)}
           </section>
-        )}
-
-        <section className="space-y-3" aria-label="今日素材列表">
-          {visibleRecords.map((record) => {
-            const status = OBSERVATION_STATUS_META[record.status];
-            const itemMedia = mediaByObservation.get(record.id);
-            const reviewPath = `/observations/${record.id}/review`;
-            const destination = record.status === "confirmed"
-              ? `/observations/${record.id}`
-              : reviewPath;
-            return (
-              <Link
-                aria-label={`打开${areaNames.get(record.area_id) ?? "未知区域"}记录`}
-                className="flex gap-4 rounded-3xl bg-surface p-3 text-inherit shadow-sm"
-                key={record.id}
-                to={destination}
-              >
-                <MediaThumbnail
-                  className="size-[84px] shrink-0 rounded-2xl"
-                  media={itemMedia}
-                  mediaType={record.media_type}
-                />
-                <div className="min-w-0 flex-1 py-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="truncate font-bold">
-                      {areaNames.get(record.area_id) ?? "未知区域"} · {formatKindergartenTime(record.created_at ?? record.observed_at)}
-                    </p>
-                    <span className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${status.className}`}>
-                      {record.status === "processing" && (
-                        <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-current" />
-                      )}
-                      {status.label}
-                    </span>
-                  </div>
-                  <p className={`mt-3 text-sm ${record.child_id == null ? "text-stone-400" : "text-ink-muted"}`}>
-                    {record.child_id == null ? "未指定幼儿" : childNames.get(record.child_id) ?? "幼儿信息待同步"}
-                  </p>
-                  {record.status === "failed" && <span className="mt-2 inline-flex min-h-8 items-center text-sm font-bold text-red-700">点开重试</span>}
-                </div>
-              </Link>
-            );
-          })}
-        </section>
+        </div>
       </div>
-
-      <div className="safe-bottom fixed inset-x-0 bottom-0 z-10 mx-auto w-full max-w-[430px] border-t border-stone-200/70 bg-canvas/95 px-5 pt-3">
-        <Link className="flex min-h-14 w-full items-center justify-center gap-2 rounded-2xl bg-brand text-lg font-bold text-white shadow-[0_8px_24px_rgba(45,105,80,0.25)]" to="/capture">
-          <Plus aria-hidden size={22} /> 记录一下
-        </Link>
-      </div>
+      <HomeTabBar active="today" />
+      {uploadOpen && <UploadSheet onClose={closeUpload} onUploaded={(duration) => navigate("/", { replace: true, state: { captureDuration: duration } })} />}
     </MobilePage>
   );
 }

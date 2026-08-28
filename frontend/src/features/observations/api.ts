@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../../api/client";
+import { requestJson } from "../../api/http";
 import type { components } from "../../api/generated/schema";
 
 export type Observation = components["schemas"]["ObservationResponse"];
@@ -354,6 +355,13 @@ interface CaptureProgress { mediaId?: number; observationId?: number }
 interface CaptureInput {
   file: File;
   areaId: number;
+  /** 主幼儿。多人游戏时选第一个，落款和文件名用它 */
+  childId: number;
+  /**
+   * 同一条素材里出现的其他幼儿（不含 childId）。
+   * FEATURES.multiChildCapture 关闭时永远是空数组，行为与原来完全一致。
+   */
+  extraChildIds?: number[];
   progress: CaptureProgress;
   onUploadProgress: (percentage: number) => void;
 }
@@ -408,7 +416,7 @@ function uploadFile(file: File, onProgress: (percentage: number) => void) {
   });
 }
 
-async function submitCapture({ file, areaId, progress, onUploadProgress }: CaptureInput) {
+async function submitCapture({ file, areaId, childId, extraChildIds = [], progress, onUploadProgress }: CaptureInput) {
   if (!progress.mediaId) {
     onUploadProgress(0);
     progress.mediaId = await uploadFile(file, onUploadProgress);
@@ -419,7 +427,9 @@ async function submitCapture({ file, areaId, progress, onUploadProgress }: Captu
   if (!progress.observationId) {
     let observationResult;
     try {
-      observationResult = await apiClient.POST("/observations", { body: { area_id: areaId } });
+      observationResult = await apiClient.POST("/observations", {
+        body: { area_id: areaId, child_id: childId },
+      });
     } catch {
       throw new CaptureError("记录没有建好，点这里重试");
     }
@@ -442,6 +452,21 @@ async function submitCapture({ file, areaId, progress, onUploadProgress }: Captu
     throw new CaptureError("素材还没关联好，点这里重试");
   }
 
+  // 多幼儿关联：主幼儿已写在 observation.child_id 上，其余的补一次关联请求。
+  // 这一步失败不回滚整条记录——素材已经存下来了，让老师之后在整理页补选，
+  // 比让他重新上传一遍视频代价小得多。
+  if (extraChildIds.length > 0) {
+    try {
+      await requestJson<void>(`/observations/${progress.observationId}/children`, {
+        method: "PUT",
+        body: JSON.stringify({ child_ids: [childId, ...extraChildIds] }),
+        fallbackMessage: "其他幼儿没有关联上，可以在整理页再补选",
+      });
+    } catch {
+      throw new CaptureError("其他幼儿没有关联上，可以在整理页再补选");
+    }
+  }
+
   return { observationId: progress.observationId };
 }
 
@@ -455,6 +480,35 @@ export function getMediaThumbnailUrl(mediaId: number) {
 
 export function getObservationExportUrl(observationId: number, includeIndicators: boolean) {
   return `/api/observations/${observationId}/export?include_indicators=${includeIndicators}`;
+}
+
+export interface ExportedObservationFile {
+  blob: Blob;
+  fileName: string;
+  size: number;
+}
+
+function exportFileName(response: Response) {
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encodedName) {
+    try {
+      return decodeURIComponent(encodedName);
+    } catch {
+      // Fall through to the ASCII filename when the header is malformed.
+    }
+  }
+  return disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? "observation.docx";
+}
+
+export async function fetchObservationExport(
+  observationId: number,
+  includeIndicators: boolean,
+): Promise<ExportedObservationFile> {
+  const response = await fetch(getObservationExportUrl(observationId, includeIndicators));
+  if (!response.ok) throw new Error("Word 文档暂时没有导出成功");
+  const blob = await response.blob();
+  return { blob, fileName: exportFileName(response), size: blob.size };
 }
 
 export function getMonthlyExportUrl(year: number, month: number, includeIndicators: boolean) {

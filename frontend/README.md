@@ -54,7 +54,8 @@ frontend/
 │   ├── components/         # 跨页面复用的基础组件
 │   ├── features/           # 按业务能力组织
 │   │   ├── media/          # 素材选择、上传和状态
-│   │   └── observations/   # 白描、指标确认、分析与记录
+│   │   ├── observations/   # 白描、指标确认、分析与记录
+│   │   └── settings/       # 幼儿与教师基础信息维护
 │   ├── pages/              # 路由级页面
 │   ├── styles/             # Tailwind 入口、设计令牌和少量全局样式
 │   ├── test/               # 测试初始化和共享测试工具
@@ -76,7 +77,7 @@ frontend/
 
 ## 5. 路由约定
 
-首版只设四个业务页面：
+首版设五个页面；设置页仅通过 URL 直达，不进入主导航：
 
 | 路径 | 页面 |
 |---|---|
@@ -84,6 +85,7 @@ frontend/
 | `/capture` | 快速沉淀 |
 | `/observations/:observationId/review` | AI 整理与教师确认 |
 | `/observations/:observationId` | 观察记录详情 |
+| `/settings` | 幼儿与教师基础信息设置 |
 
 使用 React Router 声明式模式。数据请求由 TanStack Query 处理，不使用 Router loader/action 重复建立第二套数据层。
 

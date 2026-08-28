@@ -29,6 +29,16 @@ const teacherTag: ObservationTag = {
   resolved_at: "2026-08-23T00:00:00Z",
 };
 
+const aiTag: ObservationTag = {
+  ...teacherTag,
+  id: 10,
+  source: "ai_suggested",
+  accepted: null,
+  confidence: 0.82,
+  ai_reason: "白描原文：“反复调整后继续搭建”",
+  rank_in_suggestion: 1,
+};
+
 describe("CandidateIndicators", () => {
   it("submits a teacher-added indicator with a separately selected level", async () => {
     const onAddTeacherTag = vi.fn().mockResolvedValue(undefined);
@@ -64,5 +74,27 @@ describe("CandidateIndicators", () => {
     expect(screen.getByRole("heading", { name: "你补充的" })).toBeInTheDocument();
     expect(screen.getByText("4.4 试误与问题解决")).toBeInTheDocument();
     expect(screen.getByText("高阶")).toBeInTheDocument();
+  });
+
+  it("shows three-level confidence and preserves accept or reject decisions", () => {
+    const onDecide = vi.fn();
+    render(
+      <CandidateIndicators
+        addingTeacherTag={false}
+        indicatorOptions={indicatorOptions}
+        onAddTeacherTag={vi.fn()}
+        onDecide={onDecide}
+        tags={[aiTag]}
+      />,
+    );
+
+    expect(screen.getByText("较有把握")).toBeInTheDocument();
+    expect(screen.getByText(/反复调整后继续搭建/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "采纳 试误与问题解决" }));
+    fireEvent.click(screen.getByRole("button", { name: "不采纳" }));
+
+    expect(onDecide).toHaveBeenNthCalledWith(1, 10, true);
+    expect(onDecide).toHaveBeenNthCalledWith(2, 10, false);
   });
 });

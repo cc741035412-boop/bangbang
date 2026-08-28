@@ -12,33 +12,50 @@
 
 from pathlib import Path
 from uuid import uuid4
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Optional, List, Literal
 from urllib.parse import quote
+import hashlib
+import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
 from sqlmodel import Session, select
 
 from models import (
-    engine, Area, ClassRoom, Child, Teacher,
+    engine, Area, ClassRoom, Child, Gender, Teacher,
     Observation, ObservationChild, Media, AIRun, ObservationTag,
+    Kindergarten, Account, SMSCode, AuthSession, ExportRecord,
 )
 from indicators import INDICATORS, all_indicators_flat, level_desc
-from config import DEFAULT_CLASSROOM_ID, DEFAULT_TEACHER_ID, UPLOAD_DIR
+from config import (
+    DEFAULT_CLASSROOM_ID,
+    DEFAULT_TEACHER_ID,
+    UPLOAD_DIR,
+    RUNTIME_ENV,
+    SMS_PROVIDER,
+    SMS_MOCK_CODE,
+)
 from time_utils import utc_now
 from export_service import (
     DOCX_MEDIA_TYPE,
+    MARKDOWN_MEDIA_TYPE,
+    PDF_MEDIA_TYPE,
     ExportChild,
     ExportIndicator,
     ExportObservation,
     build_observation_document,
+    build_observation_markdown,
+    build_observation_pdf,
     child_names,
     kindergarten_datetime,
 )
@@ -49,6 +66,17 @@ app = FastAPI(
     version="0.2",
     description="幼儿园教师素材沉淀与观察记录生成。工作流 B 支持 mock / DeepSeek 切换。",
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def auth_validation_error(request: Request, exc: RequestValidationError):
+    """认证页会直接展示 detail，不向教师暴露 Pydantic 的英文结构错误。"""
+    if request.url.path.startswith("/auth/"):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "填写信息不完整或格式不正确，请检查后重试"},
+        )
+    return await request_validation_exception_handler(request, exc)
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -102,6 +130,111 @@ class ObservationUpdate(BaseModel):
     strategy: Optional[str] = None
     location: Optional[str] = None
     background_note: Optional[str] = None
+
+
+class ObservationChildrenUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    child_ids: List[int]
+
+
+class ChildUpdate(BaseModel):
+    """更新已有幼儿的基础资料；未传入的字段保持不变。"""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = None
+    birth_date: Optional[date] = None
+    gender: Optional[Literal["男", "女"]] = None
+
+
+class ChildCreate(BaseModel):
+    """在当前教师班级新增幼儿。"""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    classroom_id: Optional[int] = None
+    birth_date: Optional[date] = None
+    gender: Optional[Literal["male", "female"]] = None
+
+
+class TeacherUpdate(BaseModel):
+    """更新已有教师的姓名；未传入时保持不变。"""
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = None
+
+
+class AuthCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phone: str
+
+
+class AuthLoginRequest(AuthCodeRequest):
+    code: str
+
+
+class AuthRegisterRequest(AuthLoginRequest):
+    name: str
+    kindergarten_name: str
+    classroom_name: str
+
+
+class AuthPhoneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    new_phone: str
+    code: str
+
+
+class AuthDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+
+
+class AuthAccountResponse(BaseModel):
+    id: int
+    phone: str
+    teacher_id: int
+    name: str
+    kindergarten_id: Optional[int] = None
+    kindergarten_name: Optional[str] = None
+    classroom_id: Optional[int] = None
+    classroom_name: Optional[str] = None
+    created_at: datetime
+
+
+class AuthLoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int
+    account: AuthAccountResponse
+
+
+class NameUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class ClassroomSummaryResponse(BaseModel):
+    id: int
+    name: str
+    child_count: int
+
+
+class KindergartenTeacherResponse(BaseModel):
+    id: int
+    name: str
+    phone: Optional[str] = None
+    classroom_id: Optional[int] = None
+    role: Literal["owner", "teacher"]
+
+
+class KindergartenResponse(BaseModel):
+    id: int
+    name: str
+    classrooms: List[ClassroomSummaryResponse]
+    teachers: List[KindergartenTeacherResponse]
+    my_role: Literal["owner", "teacher"]
 
 
 class ObservationCreate(BaseModel):
@@ -192,6 +325,52 @@ class RelatedChildResponse(BaseModel):
     gender: Optional[Literal["男", "女"]] = None
     is_primary: bool
     confirmed_observation_count: int = 0
+
+
+class ChildResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    classroom_id: int
+    birth_date: Optional[date] = None
+    gender: Optional[Literal["男", "女"]] = None
+
+
+class ChildProfileRecordResponse(BaseModel):
+    observation_id: int
+    title: str
+    area_name: Optional[str] = None
+    observed_at: datetime
+    dimensions: List[str]
+    exported: bool
+
+
+class ChildProfileResponse(BaseModel):
+    id: int
+    name: str
+    classroom_id: Optional[int] = None
+    classroom_name: Optional[str] = None
+    birth_date: Optional[date] = None
+    gender: Optional[Literal["male", "female"]] = None
+    created_at: Optional[datetime] = None
+    media_count: int
+    record_count: int
+    observed_day_count: int
+    dimension_counts: dict[str, int]
+    records: List[ChildProfileRecordResponse]
+
+
+class ExportHistoryResponse(BaseModel):
+    id: int
+    observation_id: Optional[int] = None
+    scope: Literal["single", "monthly"]
+    format: Literal["docx", "pdf", "md"]
+    file_name: str
+    size: int
+    child_name: Optional[str] = None
+    created_at: datetime
+    download_url: Optional[str] = None
 
 
 class TeacherResponse(BaseModel):
@@ -295,6 +474,28 @@ def sync_primary_child(session: Session, observation_id: int, child_id: Optional
     session.add(link)
 
 
+def classroom_child_names_for_anonymization(
+    session: Session,
+    observation: Observation,
+) -> List[str]:
+    """主观察对象优先，其余班级幼儿按 id 排序，供工作流 B 脱敏。"""
+    if observation.classroom_id is None:
+        return []
+    primary_ids = set(session.exec(
+        select(ObservationChild.child_id).where(
+            ObservationChild.observation_id == observation.id,
+            ObservationChild.is_primary == True,  # noqa: E712
+        )
+    ).all())
+    children = session.exec(
+        select(Child)
+        .where(Child.classroom_id == observation.classroom_id)
+        .order_by(Child.id)
+    ).all()
+    children.sort(key=lambda child: (child.id not in primary_ids, child.id))
+    return [child.name for child in children]
+
+
 def confirmed_observation_count(session: Session, child_id: int) -> int:
     """多人记录会分别计入每个关联幼儿的成长档案。"""
     return session.exec(
@@ -383,12 +584,609 @@ def media_response(media: Media):
 
 
 # ============================================================
+# 账号与认证
+# ============================================================
+
+AUTH_COOKIE_NAME = "bangbang_access_token"
+AUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+SMS_CODE_TTL_SECONDS = 5 * 60
+SMS_COOLDOWN_SECONDS = 60
+PRODUCTION_ENVS = {"production", "prod"}
+
+
+def validate_phone(phone: str) -> str:
+    normalized = phone.strip()
+    if not re.fullmatch(r"1\d{10}", normalized):
+        raise HTTPException(422, "请输入正确的 11 位手机号")
+    return normalized
+
+
+def validate_code(code: str) -> str:
+    normalized = code.strip()
+    if not re.fullmatch(r"\d{6}", normalized):
+        raise HTTPException(422, "请输入 6 位数字验证码")
+    return normalized
+
+
+def required_text(value: str, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(422, f"请填写{label}")
+    return normalized
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def request_access_token(request: Request, authorization: Optional[str]) -> Optional[str]:
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not value.strip():
+            raise HTTPException(401, "登录状态无效，请重新登录")
+        return value.strip()
+    return request.cookies.get(AUTH_COOKIE_NAME)
+
+
+def authenticated_account(
+    session: Session,
+    request: Request,
+    authorization: Optional[str],
+    *,
+    required: bool = True,
+):
+    token = request_access_token(request, authorization)
+    if not token:
+        if required:
+            raise HTTPException(401, "请先登录")
+        return None
+
+    auth_session = session.exec(
+        select(AuthSession).where(AuthSession.token_hash == token_hash(token))
+    ).first()
+    now = utc_now()
+    if (
+        not auth_session
+        or auth_session.revoked_at is not None
+        or auth_session.expires_at <= now
+    ):
+        raise HTTPException(401, "登录已失效，请重新登录")
+    account = session.get(Account, auth_session.account_id)
+    if not account or account.deleted_at is not None:
+        raise HTTPException(401, "账号已注销或登录已失效")
+    return account, auth_session
+
+
+def account_response(session: Session, account: Account) -> AuthAccountResponse:
+    teacher = session.get(Teacher, account.teacher_id)
+    kindergarten = session.get(Kindergarten, account.kindergarten_id)
+    room = session.get(ClassRoom, teacher.classroom_id) if teacher else None
+    if not teacher:
+        raise HTTPException(500, "账号关联的教师信息不存在")
+    return AuthAccountResponse(
+        id=account.id,
+        phone=account.phone,
+        teacher_id=teacher.id,
+        name=teacher.name,
+        kindergarten_id=kindergarten.id if kindergarten else None,
+        kindergarten_name=kindergarten.name if kindergarten else None,
+        classroom_id=room.id if room else None,
+        classroom_name=room.name if room else None,
+        created_at=account.created_at,
+    )
+
+
+def issue_session(session: Session, account: Account):
+    raw_token = secrets.token_urlsafe(32)
+    session.add(AuthSession(
+        account_id=account.id,
+        token_hash=token_hash(raw_token),
+        expires_at=utc_now() + timedelta(seconds=AUTH_TOKEN_TTL_SECONDS),
+    ))
+    return raw_token
+
+
+def set_auth_cookie(response: Response, token: str):
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        token,
+        max_age=AUTH_TOKEN_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=RUNTIME_ENV in PRODUCTION_ENVS,
+        path="/",
+    )
+
+
+def sms_value() -> str:
+    if SMS_PROVIDER == "mock":
+        if RUNTIME_ENV in PRODUCTION_ENVS:
+            raise HTTPException(503, "生产环境短信服务尚未配置，请联系管理员")
+        if not re.fullmatch(r"\d{6}", SMS_MOCK_CODE):
+            raise HTTPException(503, "本地验证码配置无效，请联系管理员")
+        return SMS_MOCK_CODE
+    raise HTTPException(503, "短信服务尚未配置，请联系管理员")
+
+
+def infer_sms_purpose(
+    session: Session,
+    phone: str,
+    authenticated: Optional[tuple],
+) -> str:
+    existing = session.exec(select(Account).where(Account.phone == phone)).first()
+    if authenticated:
+        account, _ = authenticated
+        return "delete_account" if phone == account.phone else "change_phone"
+    if existing and existing.deleted_at is not None:
+        raise HTTPException(410, "该手机号对应的账号已注销，暂时不能重新注册")
+    return "login" if existing else "register"
+
+
+def consume_sms_code(session: Session, phone: str, code: str, purpose: str):
+    now = utc_now()
+    sms = session.exec(
+        select(SMSCode)
+        .where(
+            SMSCode.phone == phone,
+            SMSCode.code == code,
+            SMSCode.purpose == purpose,
+            SMSCode.consumed_at == None,  # noqa: E711
+        )
+        .order_by(SMSCode.created_at.desc())
+    ).first()
+    if not sms or sms.expires_at <= now:
+        raise HTTPException(400, "验证码不正确或已失效，请重新获取")
+    sms.consumed_at = now
+    session.add(sms)
+
+
+def inferred_age_group(classroom_name: str) -> str:
+    if "小" in classroom_name:
+        return "small"
+    if "大" in classroom_name:
+        return "large"
+    return "middle"
+
+
+def require_owner(account: Account):
+    if account.role != "owner":
+        raise HTTPException(403, "只有园所管理员可以进行这项操作")
+
+
+def masked_phone(phone: str) -> str:
+    return f"{phone[:3]}****{phone[-4:]}"
+
+
+def current_kindergarten_response(
+    session: Session,
+    account: Account,
+) -> KindergartenResponse:
+    kindergarten = session.get(Kindergarten, account.kindergarten_id)
+    if not kindergarten:
+        raise HTTPException(404, "当前账号没有关联园所")
+    rooms = session.exec(
+        select(ClassRoom)
+        .where(ClassRoom.kindergarten_id == kindergarten.id)
+        .order_by(ClassRoom.id)
+    ).all()
+    classroom_rows = []
+    for room in rooms:
+        child_count = session.exec(
+            select(func.count(Child.id)).where(Child.classroom_id == room.id)
+        ).one()
+        classroom_rows.append(ClassroomSummaryResponse(
+            id=room.id,
+            name=room.name,
+            child_count=child_count,
+        ))
+
+    accounts = session.exec(
+        select(Account)
+        .where(
+            Account.kindergarten_id == kindergarten.id,
+            Account.deleted_at == None,  # noqa: E711
+        )
+        .order_by(Account.id)
+    ).all()
+    teacher_rows = []
+    for item in accounts:
+        teacher = session.get(Teacher, item.teacher_id)
+        if teacher:
+            teacher_rows.append(KindergartenTeacherResponse(
+                id=teacher.id,
+                name=teacher.name,
+                phone=masked_phone(item.phone),
+                classroom_id=teacher.classroom_id,
+                role="owner" if item.role == "owner" else "teacher",
+            ))
+    return KindergartenResponse(
+        id=kindergarten.id,
+        name=kindergarten.name,
+        classrooms=classroom_rows,
+        teachers=teacher_rows,
+        my_role="owner" if account.role == "owner" else "teacher",
+    )
+
+
+@app.post("/auth/code", tags=["账号与认证"])
+def send_auth_code(
+    payload: AuthCodeRequest,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    phone = validate_phone(payload.phone)
+    with Session(engine) as session:
+        try:
+            authenticated = authenticated_account(
+                session, request, authorization, required=False,
+            )
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            # 登录/注册页可能还带着上一个临时库或已退出会话的旧 token。
+            # 获取验证码本来就是匿名入口，旧登录态不能把新登录或注册卡死。
+            authenticated = None
+            response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+        purpose = infer_sms_purpose(session, phone, authenticated)
+        now = utc_now()
+        latest = session.exec(
+            select(SMSCode)
+            .where(SMSCode.phone == phone)
+            .order_by(SMSCode.created_at.desc())
+        ).first()
+        if latest and (now - latest.created_at).total_seconds() < SMS_COOLDOWN_SECONDS:
+            raise HTTPException(429, "验证码发送太频繁，请稍后再试")
+        code = sms_value()
+        session.add(SMSCode(
+            phone=phone,
+            code=code,
+            purpose=purpose,
+            expires_at=now + timedelta(seconds=SMS_CODE_TTL_SECONDS),
+        ))
+        session.commit()
+    return {"expires_in": SMS_CODE_TTL_SECONDS, "cooldown_sec": SMS_COOLDOWN_SECONDS}
+
+
+@app.post("/auth/login", response_model=AuthLoginResponse, tags=["账号与认证"])
+def login(
+    payload: AuthLoginRequest,
+    response: Response,
+):
+    phone = validate_phone(payload.phone)
+    code = validate_code(payload.code)
+    with Session(engine) as session:
+        account = session.exec(
+            select(Account).where(Account.phone == phone, Account.deleted_at == None)  # noqa: E711
+        ).first()
+        if not account:
+            raise HTTPException(404, "这个手机号还没有注册，请先注册")
+        consume_sms_code(session, phone, code, "login")
+        token = issue_session(session, account)
+        result = AuthLoginResponse(
+            access_token=token,
+            expires_in=AUTH_TOKEN_TTL_SECONDS,
+            account=account_response(session, account),
+        )
+        session.commit()
+    set_auth_cookie(response, token)
+    return result
+
+
+@app.post("/auth/register", response_model=AuthLoginResponse, tags=["账号与认证"])
+def register(
+    payload: AuthRegisterRequest,
+    response: Response,
+):
+    phone = validate_phone(payload.phone)
+    code = validate_code(payload.code)
+    name = required_text(payload.name, "姓名")
+    kindergarten_name = required_text(payload.kindergarten_name, "所在园所")
+    classroom_name = required_text(payload.classroom_name, "带班班级")
+    with Session(engine) as session:
+        if session.exec(select(Account).where(Account.phone == phone)).first():
+            raise HTTPException(409, "这个手机号已经注册，请直接登录")
+        consume_sms_code(session, phone, code, "register")
+        kindergarten = Kindergarten(name=kindergarten_name)
+        session.add(kindergarten)
+        session.flush()
+        room = ClassRoom(
+            name=classroom_name,
+            age_group=inferred_age_group(classroom_name),
+            kindergarten_id=kindergarten.id,
+        )
+        session.add(room)
+        session.flush()
+        teacher = Teacher(name=name, classroom_id=room.id)
+        session.add(teacher)
+        session.flush()
+        account = Account(
+            phone=phone,
+            teacher_id=teacher.id,
+            kindergarten_id=kindergarten.id,
+            role="owner",
+        )
+        session.add(account)
+        session.flush()
+        token = issue_session(session, account)
+        result = AuthLoginResponse(
+            access_token=token,
+            expires_in=AUTH_TOKEN_TTL_SECONDS,
+            account=account_response(session, account),
+        )
+        session.commit()
+    set_auth_cookie(response, token)
+    return result
+
+
+@app.get("/auth/me", response_model=AuthAccountResponse, tags=["账号与认证"])
+def auth_me(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        return account_response(session, account)
+
+
+@app.post("/auth/logout", status_code=204, tags=["账号与认证"])
+def logout(
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    with Session(engine) as session:
+        _, auth_session = authenticated_account(session, request, authorization)
+        auth_session.revoked_at = utc_now()
+        session.add(auth_session)
+        session.commit()
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.status_code = 204
+    return response
+
+
+@app.patch("/auth/phone", response_model=AuthAccountResponse, tags=["账号与认证"])
+def change_phone(
+    payload: AuthPhoneRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    new_phone = validate_phone(payload.new_phone)
+    code = validate_code(payload.code)
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        if new_phone == account.phone:
+            raise HTTPException(409, "新手机号不能和当前手机号相同")
+        if session.exec(select(Account).where(Account.phone == new_phone)).first():
+            raise HTTPException(409, "这个手机号已经被其他账号使用")
+        consume_sms_code(session, new_phone, code, "change_phone")
+        account.phone = new_phone
+        session.add(account)
+        session.commit()
+        session.refresh(account)
+        return account_response(session, account)
+
+
+def stage_account_media(session: Session, observation_ids: List[int]):
+    media_rows = []
+    if observation_ids:
+        media_rows = session.exec(
+            select(Media).where(Media.observation_id.in_(observation_ids))
+        ).all()
+    staging = Path(tempfile.mkdtemp(prefix="account-delete-", dir=UPLOAD_DIR))
+    moved = []
+    try:
+        for media in media_rows:
+            candidates = [
+                UPLOAD_DIR / media.stored_filename,
+                get_thumbnail_path(media.stored_filename),
+                get_thumbnail_error_path(media.stored_filename),
+            ]
+            for source in candidates:
+                if source.is_file():
+                    target = staging / source.name
+                    source.replace(target)
+                    moved.append((source, target))
+    except Exception:
+        for source, target in reversed(moved):
+            if target.exists():
+                target.replace(source)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise HTTPException(500, "素材文件暂时无法安全删除，请稍后重试")
+    return staging, moved, media_rows
+
+
+@app.delete("/auth/account", status_code=204, tags=["账号与认证"])
+def delete_account(
+    payload: AuthDeleteRequest,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    code = validate_code(payload.code)
+    staging = None
+    moved = []
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        consume_sms_code(session, account.phone, code, "delete_account")
+        observations = session.exec(
+            select(Observation).where(Observation.observer_id == account.teacher_id)
+        ).all()
+        observation_ids = [item.id for item in observations]
+        staging, moved, media_rows = stage_account_media(session, observation_ids)
+        try:
+            if observation_ids:
+                for tag in session.exec(select(ObservationTag).where(ObservationTag.observation_id.in_(observation_ids))).all():
+                    session.delete(tag)
+                for run in session.exec(select(AIRun).where(AIRun.observation_id.in_(observation_ids))).all():
+                    session.delete(run)
+                for link in session.exec(select(ObservationChild).where(ObservationChild.observation_id.in_(observation_ids))).all():
+                    session.delete(link)
+            for media in media_rows:
+                session.delete(media)
+            for observation in observations:
+                session.delete(observation)
+            for auth_session in session.exec(select(AuthSession).where(AuthSession.account_id == account.id)).all():
+                auth_session.revoked_at = utc_now()
+                session.add(auth_session)
+            account.deleted_at = utc_now()
+            session.add(account)
+            session.commit()
+        except Exception:
+            session.rollback()
+            for source, target in reversed(moved):
+                if target.exists():
+                    target.replace(source)
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)
+            raise HTTPException(500, "账号注销没有完成，数据未删除，请稍后重试")
+    if staging:
+        shutil.rmtree(staging, ignore_errors=True)
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.status_code = 204
+    return response
+
+
+# ============================================================
 # 基础
 # ============================================================
 
 @app.get("/health", tags=["基础"])
 def health():
     return {"status": "ok"}
+
+
+@app.get(
+    "/kindergartens/current",
+    response_model=KindergartenResponse,
+    tags=["园所与班级"],
+)
+def get_current_kindergarten(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        return current_kindergarten_response(session, account)
+
+
+@app.patch(
+    "/kindergartens/current",
+    response_model=KindergartenResponse,
+    tags=["园所与班级"],
+)
+def rename_current_kindergarten(
+    payload: NameUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    name = required_text(payload.name, "园所名称")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        require_owner(account)
+        kindergarten = session.get(Kindergarten, account.kindergarten_id)
+        if not kindergarten:
+            raise HTTPException(404, "当前账号没有关联园所")
+        kindergarten.name = name
+        session.add(kindergarten)
+        session.commit()
+        return current_kindergarten_response(session, account)
+
+
+@app.post(
+    "/classrooms",
+    response_model=ClassroomSummaryResponse,
+    status_code=201,
+    tags=["园所与班级"],
+)
+def create_classroom(
+    payload: NameUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    name = required_text(payload.name, "班级名称")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        require_owner(account)
+        room = ClassRoom(
+            name=name,
+            age_group=inferred_age_group(name),
+            kindergarten_id=account.kindergarten_id,
+        )
+        session.add(room)
+        session.commit()
+        session.refresh(room)
+        return ClassroomSummaryResponse(id=room.id, name=room.name, child_count=0)
+
+
+def owned_classroom(session: Session, account: Account, classroom_id: int) -> ClassRoom:
+    room = session.get(ClassRoom, classroom_id)
+    if not room or room.kindergarten_id != account.kindergarten_id:
+        raise HTTPException(404, "班级不存在")
+    return room
+
+
+@app.patch(
+    "/classrooms/{classroom_id}",
+    response_model=ClassroomSummaryResponse,
+    tags=["园所与班级"],
+)
+def rename_classroom(
+    classroom_id: int,
+    payload: NameUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    name = required_text(payload.name, "班级名称")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        require_owner(account)
+        room = owned_classroom(session, account, classroom_id)
+        room.name = name
+        room.age_group = inferred_age_group(name)
+        session.add(room)
+        child_count = session.exec(
+            select(func.count(Child.id)).where(Child.classroom_id == room.id)
+        ).one()
+        session.commit()
+        return ClassroomSummaryResponse(
+            id=room.id,
+            name=room.name,
+            child_count=child_count,
+        )
+
+
+@app.delete("/classrooms/{classroom_id}", status_code=204, tags=["园所与班级"])
+def delete_classroom(
+    classroom_id: int,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        require_owner(account)
+        room = owned_classroom(session, account, classroom_id)
+        child_count = session.exec(
+            select(func.count(Child.id)).where(Child.classroom_id == room.id)
+        ).one()
+        if child_count:
+            raise HTTPException(
+                409,
+                f"{room.name}还有 {child_count} 名幼儿，请先移出或删除后再删班级",
+            )
+        teacher_count = session.exec(
+            select(func.count(Teacher.id)).where(Teacher.classroom_id == room.id)
+        ).one()
+        if teacher_count:
+            raise HTTPException(
+                409,
+                f"{room.name}还有 {teacher_count} 名教师，请先调整教师班级后再删除",
+            )
+        session.delete(room)
+        session.commit()
+    response.status_code = 204
+    return response
 
 
 @app.get("/areas", tags=["基础"])
@@ -398,11 +1196,240 @@ def list_areas():
         return s.exec(select(Area)).all()
 
 
-@app.get("/children", tags=["基础"])
+@app.get("/children", response_model=List[ChildResponse], tags=["基础"])
 def list_children():
     """所有小朋友"""
     with Session(engine) as s:
         return s.exec(select(Child)).all()
+
+
+@app.post("/children", status_code=201, tags=["基础"])
+def create_child(
+    payload: ChildCreate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """新增幼儿；不能借 classroom_id 把数据写进其他班级。"""
+    name = required_text(payload.name, "幼儿姓名")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        teacher = session.get(Teacher, account.teacher_id)
+        if not teacher:
+            raise HTTPException(500, "账号关联的教师信息不存在")
+        classroom_id = payload.classroom_id or teacher.classroom_id
+        if classroom_id != teacher.classroom_id:
+            raise HTTPException(422, "只能向当前带班班级添加幼儿")
+        child = Child(
+            name=name,
+            classroom_id=classroom_id,
+            birth_date=payload.birth_date,
+            gender={"male": Gender.MALE, "female": Gender.FEMALE}.get(payload.gender),
+        )
+        session.add(child)
+        session.commit()
+        session.refresh(child)
+        return {"id": child.id, "name": child.name}
+
+
+@app.get(
+    "/children/{child_id}/profile",
+    response_model=ChildProfileResponse,
+    tags=["基础"],
+)
+def child_profile(
+    child_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """返回当前教师班级内一名幼儿的事实型档案聚合。"""
+    profile_dimensions = ("身体参与", "社会互动")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        teacher = session.get(Teacher, account.teacher_id)
+        child = session.get(Child, child_id)
+        if not teacher or not child or child.classroom_id != teacher.classroom_id:
+            raise HTTPException(404, "幼儿不存在")
+
+        room = session.get(ClassRoom, child.classroom_id)
+        links = session.exec(
+            select(ObservationChild).where(ObservationChild.child_id == child.id)
+        ).all()
+        linked_ids = {link.observation_id for link in links}
+        legacy_observations = session.exec(
+            select(Observation).where(Observation.child_id == child.id)
+        ).all()
+        observations_by_id = {item.id: item for item in legacy_observations}
+        if linked_ids:
+            linked_observations = session.exec(
+                select(Observation).where(Observation.id.in_(linked_ids))
+            ).all()
+            observations_by_id.update({item.id: item for item in linked_observations})
+        observations = list(observations_by_id.values())
+        observation_ids = list(observations_by_id)
+
+        media_rows = []
+        if observation_ids:
+            media_rows = session.exec(
+                select(Media).where(Media.observation_id.in_(observation_ids))
+            ).all()
+
+        confirmed = sorted(
+            (item for item in observations if item.status == "confirmed"),
+            key=lambda item: item.observed_at,
+            reverse=True,
+        )
+        confirmed_ids = [item.id for item in confirmed]
+        tags = []
+        if confirmed_ids:
+            tags = session.exec(
+                select(ObservationTag).where(
+                    ObservationTag.observation_id.in_(confirmed_ids),
+                    ObservationTag.accepted == True,  # noqa: E712
+                )
+            ).all()
+
+        dimensions_by_observation = {item.id: set() for item in confirmed}
+        for tag in tags:
+            dimension = INDICATORS.get(tag.indicator_code, {}).get("dimension")
+            if dimension in profile_dimensions:
+                dimensions_by_observation[tag.observation_id].add(dimension)
+
+        dimension_counts = {dimension: 0 for dimension in profile_dimensions}
+        exported_observation_ids = set(session.exec(
+            select(ExportRecord.observation_id).where(
+                ExportRecord.account_id == account.id,
+                ExportRecord.observation_id.in_(confirmed_ids),
+            )
+        ).all()) if confirmed_ids else set()
+        records = []
+        for observation in confirmed:
+            dimensions = [
+                dimension
+                for dimension in profile_dimensions
+                if dimension in dimensions_by_observation[observation.id]
+            ]
+            for dimension in dimensions:
+                dimension_counts[dimension] += 1
+            area = session.get(Area, observation.area_id)
+            area_name = area.name if area else None
+            records.append(ChildProfileRecordResponse(
+                observation_id=observation.id,
+                title=f"{area_name}观察记录" if area_name else "观察记录",
+                area_name=area_name,
+                observed_at=observation.observed_at,
+                dimensions=dimensions,
+                exported=observation.id in exported_observation_ids,
+            ))
+
+        evidence_times = [item.created_at for item in observations]
+        evidence_times.extend(item.uploaded_at for item in media_rows)
+        observed_days = {
+            kindergarten_datetime(item.observed_at).date() for item in observations
+        }
+        observed_days.update(
+            kindergarten_datetime(item.uploaded_at).date() for item in media_rows
+        )
+        gender = getattr(child.gender, "value", child.gender)
+        return ChildProfileResponse(
+            id=child.id,
+            name=child.name,
+            classroom_id=child.classroom_id,
+            classroom_name=room.name if room else None,
+            birth_date=child.birth_date,
+            gender={"男": "male", "女": "female"}.get(gender),
+            created_at=min(evidence_times) if evidence_times else None,
+            media_count=len(media_rows),
+            record_count=len(confirmed),
+            observed_day_count=len(observed_days),
+            dimension_counts=dimension_counts,
+            records=records,
+        )
+
+
+@app.delete("/children/{child_id}", status_code=204, tags=["基础"])
+def delete_child(
+    child_id: int,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    """只删除没有任何素材或观察记录的幼儿，不提供级联删除。"""
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        teacher = session.get(Teacher, account.teacher_id)
+        child = session.get(Child, child_id)
+        if not teacher or not child or child.classroom_id != teacher.classroom_id:
+            raise HTTPException(404, "幼儿不存在")
+
+        linked_ids = set(session.exec(
+            select(ObservationChild.observation_id).where(
+                ObservationChild.child_id == child.id
+            )
+        ).all())
+        linked_ids.update(session.exec(
+            select(Observation.id).where(Observation.child_id == child.id)
+        ).all())
+        media_count = 0
+        if linked_ids:
+            media_count = session.exec(
+                select(func.count(Media.id)).where(Media.observation_id.in_(linked_ids))
+            ).one()
+        record_count = len(linked_ids)
+        if media_count or record_count:
+            raise HTTPException(
+                409,
+                f"{child.name}名下还有 {media_count} 条素材、{record_count} 篇记录，请先处理后再删除",
+            )
+
+        session.delete(child)
+        session.commit()
+    response.status_code = 204
+    return response
+
+
+@app.patch("/children/{child_id}", response_model=ChildResponse, tags=["基础"])
+def update_child(child_id: int, payload: ChildUpdate):
+    """修改已有幼儿的姓名、出生日期或性别。"""
+    with Session(engine) as s:
+        child = s.get(Child, child_id)
+        if not child:
+            raise HTTPException(404, "幼儿不存在")
+
+        data = payload.model_dump(exclude_unset=True)
+        if data.get("name", "present") is None:
+            raise HTTPException(422, "幼儿姓名不能为 null")
+        for key, value in data.items():
+            setattr(child, key, value)
+        s.add(child)
+        s.commit()
+        s.refresh(child)
+        return child
+
+
+@app.get("/teachers", response_model=List[TeacherResponse], tags=["基础"])
+def list_teachers():
+    """所有教师；供极简设置页读取。"""
+    with Session(engine) as s:
+        return s.exec(select(Teacher)).all()
+
+
+@app.patch("/teachers/{teacher_id}", response_model=TeacherResponse, tags=["基础"])
+def update_teacher(teacher_id: int, payload: TeacherUpdate):
+    """修改已有教师的姓名。"""
+    with Session(engine) as s:
+        teacher = s.get(Teacher, teacher_id)
+        if not teacher:
+            raise HTTPException(404, "教师不存在")
+
+        data = payload.model_dump(exclude_unset=True)
+        if data.get("name", "present") is None:
+            raise HTTPException(422, "教师姓名不能为 null")
+        for key, value in data.items():
+            setattr(teacher, key, value)
+        s.add(teacher)
+        s.commit()
+        s.refresh(teacher)
+        return teacher
 
 
 @app.get("/indicators", tags=["基础"])
@@ -547,13 +1574,21 @@ def get_media_thumbnail(media_id: int):
 # ============================================================
 
 @app.post("/observations", status_code=201, tags=["2·观察记录"])
-def create_observation(payload: ObservationCreate):
+def create_observation(
+    payload: ObservationCreate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """现场新建观察记录；只要求游戏区，状态固定为 uploaded。"""
     with Session(engine) as s:
-        teacher = s.get(Teacher, DEFAULT_TEACHER_ID)
+        authenticated = authenticated_account(
+            s, request, authorization, required=False,
+        )
+        teacher_id = authenticated[0].teacher_id if authenticated else DEFAULT_TEACHER_ID
+        teacher = s.get(Teacher, teacher_id)
         if not teacher:
-            raise HTTPException(500, "默认教师配置无效，请检查 DEFAULT_TEACHER_ID")
-        if teacher.classroom_id != DEFAULT_CLASSROOM_ID:
+            raise HTTPException(500, "账号关联的教师信息不存在")
+        if not authenticated and teacher.classroom_id != DEFAULT_CLASSROOM_ID:
             raise HTTPException(500, "默认教师与默认班级配置不一致")
         room = s.get(ClassRoom, teacher.classroom_id)
         if not room:
@@ -627,6 +1662,56 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
         s.commit()
         return {"ok": True, "observation_id": obs_id, "media_id": media_id,
                 "media_type": obs.media_type, "status": obs.status}
+
+
+@app.put("/observations/{obs_id}/children", tags=["2·观察记录"])
+def replace_observation_children(
+    obs_id: int,
+    payload: ObservationChildrenUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """全量替换素材中的幼儿关联；第一个幼儿同步为记录主角。"""
+    child_ids = list(dict.fromkeys(payload.child_ids))
+    if not child_ids:
+        raise HTTPException(422, "请至少选择一名幼儿")
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        teacher = session.get(Teacher, account.teacher_id)
+        observation = session.get(Observation, obs_id)
+        if (
+            not teacher
+            or not observation
+            or observation.classroom_id != teacher.classroom_id
+        ):
+            raise HTTPException(404, "观察记录不存在")
+        if observation.status not in {"uploaded", "ready_for_review", "failed"}:
+            raise HTTPException(400, f"状态为 {observation.status} 时不能修改观察幼儿")
+
+        children = [session.get(Child, child_id) for child_id in child_ids]
+        if any(
+            child is None or child.classroom_id != observation.classroom_id
+            for child in children
+        ):
+            raise HTTPException(422, "所选幼儿必须都在当前班级")
+
+        old_links = session.exec(
+            select(ObservationChild).where(
+                ObservationChild.observation_id == observation.id
+            )
+        ).all()
+        for link in old_links:
+            session.delete(link)
+        observation.child_id = child_ids[0]
+        session.add(observation)
+        for index, child_id in enumerate(child_ids):
+            session.add(ObservationChild(
+                observation_id=observation.id,
+                child_id=child_id,
+                is_primary=index == 0,
+            ))
+        session.commit()
+        return {"child_ids": child_ids}
 
 
 @app.patch("/observations/{obs_id}", tags=["2·观察记录"])
@@ -856,6 +1941,7 @@ def suggest_tags(obs_id: int):
                 area_name=area.name if area else "",
                 age_group=obs.age_group,
                 duration_sec=media.duration_sec if media else None,
+                child_names=classroom_child_names_for_anonymization(s, obs),
             )
         except Exception as exc:
             transition_observation(
@@ -1153,24 +2239,53 @@ def safe_filename_part(value: str) -> str:
     return "".join("_" if char in '\\/:*?\"<>|' else char for char in value).strip() or "未填写"
 
 
-def docx_download(content: bytes, filename: str):
+EXPORT_FORMATS = {
+    "docx": (DOCX_MEDIA_TYPE, build_observation_document),
+    "pdf": (PDF_MEDIA_TYPE, build_observation_pdf),
+    "md": (MARKDOWN_MEDIA_TYPE, build_observation_markdown),
+}
+
+
+def validate_export_format(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in EXPORT_FORMATS:
+        raise HTTPException(422, "导出格式只支持 docx、pdf 或 md")
+    return normalized
+
+
+def export_download(content: bytes, filename: str, media_type: str, extension: str):
     encoded = quote(filename)
     headers = {
         "Content-Disposition": (
-            f'attachment; filename="observation.docx"; filename*=UTF-8\'\'{encoded}'
+            f'attachment; filename="observation.{extension}"; filename*=UTF-8\'\'{encoded}'
         ),
         "Content-Length": str(len(content)),
     }
-    return StreamingResponse(BytesIO(content), media_type=DOCX_MEDIA_TYPE, headers=headers)
+    return StreamingResponse(BytesIO(content), media_type=media_type, headers=headers)
+
+
+def build_export(records: List[ExportObservation], export_format: str, include_indicators: bool):
+    media_type, builder = EXPORT_FORMATS[export_format]
+    try:
+        content = builder(records, include_indicators=include_indicators)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return content, media_type
 
 
 @app.get("/observations/{obs_id}/export", tags=["5·成果"])
 def export_observation(
     obs_id: int,
+    request: Request,
     include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
+    export_format: str = Query("docx", alias="format", description="docx / pdf / md"),
+    authorization: Optional[str] = Header(None),
 ):
-    """按园所固定 4 列 8 行模板导出一条已确认观察记录。"""
+    """导出一条已确认观察记录；缺省保持 Word 行为。"""
+    export_format = validate_export_format(export_format)
     with Session(engine) as s:
+        authenticated = authenticated_account(s, request, authorization, required=False)
+        account_id = authenticated[0].id if authenticated else None
         obs = s.get(Observation, obs_id)
         if not obs:
             raise HTTPException(404, "观察记录不存在")
@@ -1180,22 +2295,37 @@ def export_observation(
 
     local = kindergarten_datetime(record.observed_at)
     names = safe_filename_part(child_names(record) or "未指定幼儿")
-    filename = f"观察记录_{names}_{local:%Y%m%d}.docx"
-    content = build_observation_document(
-        [record],
-        include_indicators=include_indicators,
-    )
-    return docx_download(content, filename)
+    filename = f"{names}_观察记录_{local:%Y%m%d}.{export_format}"
+    content, media_type = build_export([record], export_format, include_indicators)
+    if account_id is not None:
+        with Session(engine) as s:
+            s.add(ExportRecord(
+                account_id=account_id,
+                observation_id=obs_id,
+                scope="single",
+                format=export_format,
+                file_name=filename,
+                size=len(content),
+                child_name=child_names(record) or None,
+            ))
+            s.commit()
+    return export_download(content, filename, media_type, export_format)
 
 
 @app.get("/exports/monthly", tags=["5·成果"])
 def export_monthly_observations(
+    request: Request,
     year: int = Query(..., ge=2000, le=2100),
     month: int = Query(..., ge=1, le=12),
     include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
+    export_format: str = Query("docx", alias="format", description="docx / pdf / md"),
+    authorization: Optional[str] = Header(None),
 ):
     """导出指定北京时间月份内的全部已确认观察记录。"""
+    export_format = validate_export_format(export_format)
     with Session(engine) as s:
+        authenticated = authenticated_account(s, request, authorization, required=False)
+        account_id = authenticated[0].id if authenticated else None
         confirmed = s.exec(
             select(Observation).where(Observation.status == "confirmed")
         ).all()
@@ -1212,12 +2342,54 @@ def export_monthly_observations(
         records = [export_observation_data(s, obs) for obs in selected]
 
     observer_name = safe_filename_part(records[0].observer_name or "未填写")
-    filename = f"自主游戏观察记录_{year}年{month}月_{observer_name}.docx"
-    content = build_observation_document(
-        records,
-        include_indicators=include_indicators,
-    )
-    return docx_download(content, filename)
+    filename = f"自主游戏观察记录_{year}年{month}月_{observer_name}.{export_format}"
+    content, media_type = build_export(records, export_format, include_indicators)
+    if account_id is not None:
+        with Session(engine) as s:
+            s.add(ExportRecord(
+                account_id=account_id,
+                observation_id=None,
+                scope="monthly",
+                format=export_format,
+                file_name=filename,
+                size=len(content),
+                child_name=None,
+            ))
+            s.commit()
+    return export_download(content, filename, media_type, export_format)
+
+
+@app.get(
+    "/exports/history",
+    response_model=List[ExportHistoryResponse],
+    tags=["5·成果"],
+)
+def export_history(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    with Session(engine) as session:
+        account, _ = authenticated_account(session, request, authorization)
+        records = session.exec(
+            select(ExportRecord)
+            .where(ExportRecord.account_id == account.id)
+            .order_by(ExportRecord.created_at.desc(), ExportRecord.id.desc())
+        ).all()
+        return [
+            ExportHistoryResponse(
+                id=item.id,
+                observation_id=item.observation_id,
+                scope=item.scope,
+                format=item.format,
+                file_name=item.file_name,
+                size=item.size,
+                child_name=item.child_name,
+                created_at=item.created_at,
+                # 首期不重复保存生成文件，页面会引导重新导出。
+                download_url=None,
+            )
+            for item in records
+        ]
 
 
 @app.get("/metrics/ai-quality", tags=["5·成果"])

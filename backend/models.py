@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 from datetime import date, datetime
 from enum import Enum
-from sqlalchemy import Column, Enum as SAEnum, JSON
+from sqlalchemy import Column, Enum as SAEnum, JSON, String
 from sqlmodel import SQLModel, Field, create_engine
 from config import DATABASE_PATH, SQL_ECHO
 from time_utils import UTCDateTime, utc_now
@@ -19,6 +19,10 @@ class ClassRoom(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str         # 班级名，如 中二班
     age_group: str    # small=小班 / middle=中班 / large=大班
+    kindergarten_id: Optional[int] = Field(
+        default=None,
+        foreign_key="kindergartens.id",
+    )
 
 
 # ========== 表3：幼儿 ==========
@@ -50,6 +54,94 @@ class Teacher(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     classroom_id: int = Field(foreign_key="classroom.id")
+
+
+# ========== 账号与认证 ==========
+class Kindergarten(SQLModel, table=True):
+    __tablename__ = "kindergartens"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+
+
+class Account(SQLModel, table=True):
+    __tablename__ = "accounts"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    phone: str = Field(
+        sa_column=Column(String(11), unique=True, nullable=False, index=True),
+    )
+    teacher_id: int = Field(foreign_key="teacher.id")
+    kindergarten_id: int = Field(foreign_key="kindergartens.id")
+    role: str = "owner"
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+
+
+class SMSCode(SQLModel, table=True):
+    __tablename__ = "sms_codes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    phone: str = Field(sa_column=Column(String(11), nullable=False, index=True))
+    code: str = Field(sa_column=Column(String(6), nullable=False))
+    purpose: str
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime(), nullable=False))
+    consumed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+
+
+class AuthSession(SQLModel, table=True):
+    __tablename__ = "auth_sessions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(foreign_key="accounts.id")
+    token_hash: str = Field(
+        sa_column=Column(String(64), unique=True, nullable=False, index=True),
+    )
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime(), nullable=False))
+    revoked_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+
+
+# ========== 导出历史 ==========
+class ExportRecord(SQLModel, table=True):
+    __tablename__ = "export_records"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(foreign_key="accounts.id", index=True)
+    observation_id: Optional[int] = Field(default=None, foreign_key="observation.id")
+    scope: str
+    format: str
+    file_name: str
+    size: int
+    child_name: Optional[str] = None
+    storage_key: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
 
 
 # ========== 表5：观察记录 ==========

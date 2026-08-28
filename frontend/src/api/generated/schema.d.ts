@@ -61,6 +61,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/children/{child_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Child
+         * @description 修改已有幼儿的姓名、出生日期或性别。
+         */
+        patch: operations["update_child_children__child_id__patch"];
+        trace?: never;
+    };
+    "/teachers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Teachers
+         * @description 所有教师；供极简设置页读取。
+         */
+        get: operations["list_teachers_teachers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teachers/{teacher_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Teacher
+         * @description 修改已有教师的姓名。
+         */
+        patch: operations["update_teacher_teachers__teacher_id__patch"];
+        trace?: never;
+    };
     "/indicators": {
         parameters: {
             query?: never;
@@ -416,6 +476,31 @@ export interface components {
              */
             file: string;
         };
+        /** ChildResponse */
+        ChildResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Classroom Id */
+            classroom_id: number;
+            /** Birth Date */
+            birth_date?: string | null;
+            /** Gender */
+            gender?: ("男" | "女") | null;
+        };
+        /**
+         * ChildUpdate
+         * @description 更新已有幼儿的基础资料；未传入的字段保持不变。
+         */
+        ChildUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Birth Date */
+            birth_date?: string | null;
+            /** Gender */
+            gender?: ("男" | "女") | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -722,6 +807,14 @@ export interface components {
             /** Classroom Id */
             classroom_id: number;
         };
+        /**
+         * TeacherUpdate
+         * @description 更新已有教师的姓名；未传入时保持不变。
+         */
+        TeacherUpdate: {
+            /** Name */
+            name?: string | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -799,7 +892,97 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ChildResponse"][];
+                };
+            };
+        };
+    };
+    update_child_children__child_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                child_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChildUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChildResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_teachers_teachers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeacherResponse"][];
+                };
+            };
+        };
+    };
+    update_teacher_teachers__teacher_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                teacher_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TeacherUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeacherResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
