@@ -36,6 +36,7 @@ export interface Media {
 }
 
 export const MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024;
+export const MAX_UPLOAD_SECONDS = 180; // 建议 1~3 分钟；超过会明显降低白描质量
 
 const queryKeys = {
   observations: ["observations"] as const,
@@ -137,6 +138,46 @@ export function useTodayMediaData() {
   return { observations, areas, children, media };
 }
 
+export interface ObservationSearchFilters {
+  /** 幼儿：主幼儿或关联幼儿命中都会返回 */
+  child_id?: number;
+  /** 游戏区域 */
+  area_id?: number;
+  status?: Observation["status"];
+  /** 观察日期（北京时间）起，含当天，YYYY-MM-DD */
+  date_from?: string;
+  /** 观察日期（北京时间）止，含当天，YYYY-MM-DD */
+  date_to?: string;
+}
+
+/** 把检索条件转成 GET /observations 的查询参数；空条件不发送。 */
+export function observationSearchParams(filters: ObservationSearchFilters) {
+  return {
+    ...(filters.child_id != null ? { child_id: filters.child_id } : {}),
+    ...(filters.area_id != null ? { area_id: filters.area_id } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.date_from ? { date_from: filters.date_from } : {}),
+    ...(filters.date_to ? { date_to: filters.date_to } : {}),
+  };
+}
+
+export function useObservationSearch(filters: ObservationSearchFilters) {
+  return useQuery({
+    queryKey: [...queryKeys.observations, "search", filters],
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET("/observations", {
+        params: { query: observationSearchParams(filters) },
+      });
+      if (error || !data) throw new Error("观察记录加载失败");
+      return data;
+    },
+  });
+}
+
+export function useAllMedia() {
+  return useQuery({ queryKey: queryKeys.media, queryFn: getMedia });
+}
+
 export function useAreas() {
   return useQuery({ queryKey: queryKeys.areas, queryFn: getAreas });
 }
@@ -186,7 +227,12 @@ export function useGenerateNarrative(id: number) {
     },
     onMutate: () => updateObservationStatus(queryClient, id, "processing"),
     onSuccess: (result) => {
-      if (result.is_mock) sessionStorage.setItem(`narrative-is-mock:${id}`, "true");
+      if (result.is_mock) {
+        sessionStorage.setItem(`narrative-is-mock:${id}`, "true");
+      } else {
+        // 已用真实模型生成：清掉历史遗留的 mock 标记，避免页面误显示"尚未接入真实 AI"。
+        sessionStorage.removeItem(`narrative-is-mock:${id}`);
+      }
       updateObservationStatus(queryClient, id, result.status);
     },
     onSettled: async () => {
@@ -236,6 +282,22 @@ export function useUpdateObservation(id: number) {
       queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
         current?.map((item) => item.id === id ? { ...item, ...saved } : item)
       ));
+    },
+  });
+}
+
+export function useDeleteObservation(id: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { error } = await apiClient.DELETE("/observations/{obs_id}", {
+        params: { path: { obs_id: id } },
+      });
+      if (error) throw new Error("这条记录没有删除成功");
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: queryKeys.observation(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.observations });
     },
   });
 }
@@ -383,6 +445,7 @@ function getId(data: unknown, step: string): number {
 function uploadErrorMessage(status?: number) {
   if (status === 413) return "文件太大了，最多 200MB。可以拍短一点的视频";
   if (status === 400) return "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）";
+  if (status === 422) return "视频太长了，建议录 1~3 分钟的片段。超过 3 分钟会影响生成效果，请缩短后再上传";
   return "上传失败，点这里重试";
 }
 

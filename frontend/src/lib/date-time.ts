@@ -94,3 +94,13 @@ export function getKindergartenYearMonth(value = new Date()) {
     month: Number(parts.find((part) => part.type === "month")?.value),
   };
 }
+
+/** 今天的幼儿园本地日期键，如 "2026-08-27"（用于检索页的“今天/本月”快捷区间）。 */
+export function getKindergartenTodayKey() {
+  return getKindergartenDateKey(new Date());
+}
+
+/** 由日期键推本月第一天："2026-08-27" → "2026-08-01"。 */
+export function kindergartenMonthStartKey(dateKey: string) {
+  return `${dateKey.slice(0, 7)}-01`;
+}

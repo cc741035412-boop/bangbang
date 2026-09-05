@@ -705,6 +705,24 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(too_large.status_code, 413)
         self.assertEqual(too_large.json()["detail"], "文件不能超过 200MB")
 
+    def test_upload_rejects_video_over_duration_limit(self):
+        with patch.object(main, "_probe_video_duration", return_value=300):
+            resp = self.client.post(
+                "/uploads",
+                files={"file": ("long.mp4", b"mock-video", "video/mp4")},
+            )
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("3 分钟", resp.json()["detail"])
+
+    def test_upload_stores_real_video_duration(self):
+        with patch.object(main, "_probe_video_duration", return_value=120):
+            resp = self.client.post(
+                "/uploads",
+                files={"file": ("clip.mp4", b"mock-video", "video/mp4")},
+            )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["duration_sec"], 120)
+
     def test_iphone_media_types_and_extension_fallback(self):
         cases = [
             ("iphone.mov", "video/quicktime", "video/quicktime", "video"),

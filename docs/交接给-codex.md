@@ -115,13 +115,17 @@ export const FEATURES = {
 
 | 序 | 功能 | 开关 | 状态 |
 |---|---|---|---|
-| 1 | 登录 / 退出 / 账号与安全 | `auth` | **进行中**，见下方 |
-| 3 | PDF / Markdown 导出 | `exportPdf` `exportMarkdown` | 待做，最独立、最快见效 |
-| 5 | 幼儿档案详情 | `childProfile` | 待做 |
-| 6 | 新增 / 删除幼儿 | `childMutation` | 待做 |
-| 4 | 导出历史 | `exportHistory` | 待做 |
-| 7 | 多幼儿关联上传 | `multiChildCapture` | 待做 |
-| 2 | 园所与班级 | `kindergarten` | 待做 |
+| 1 | 登录 / 退出 / 账号与安全 | `auth` | ✅ 已完成（2026-08-28） |
+| 3 | PDF / Markdown 导出 | `exportPdf` `exportMarkdown` | ✅ 已完成，docx/pdf/md 三种格式均已实测 |
+| 5 | 幼儿档案详情 | `childProfile` | ✅ 已完成 |
+| 6 | 新增 / 删除幼儿 | `childMutation` | ✅ 已完成 |
+| 4 | 导出历史 | `exportHistory` | ✅ 已完成（`export_records` 表已建，见 `migration-20260828-kindergarten-export.md`） |
+| 7 | 多幼儿关联上传 | `multiChildCapture` | ✅ 已完成 |
+| 2 | 园所与班级 | `kindergarten` | ✅ 已完成（`classroom.kindergarten_id` 已迁移回填） |
+
+> 2026-08-28 更新：上述功能后端接口与前端页面均已就绪，开关全部为 `true`。
+> 前端 `/api` 代理默认端口已由 8000 修正为 8001（与后端默认一致）。
+> 下一步：多模态接入，方案见 `multimodal-integration-plan.md`，等 dawei 拍板后实施。
 
 **每做完一项**：
 ```

@@ -1,4 +1,4 @@
-import { ChevronRight, Download, FolderOpen, LogOut, School, ShieldCheck, Settings, Users } from "lucide-react";
+import { ChevronRight, Download, FolderOpen, LogOut, School, Search, Settings, ShieldCheck, Users } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 
@@ -110,6 +110,8 @@ export function MinePage() {
 
         <SectionTitle>我的记录</SectionTitle>
         <section className="space-y-3">
+          <RowLink icon={<Search className="text-brand" size={22} />} label="检索观察记录" to="/records" />
+
           <a
             className="flex min-h-16 items-center gap-3 rounded-2xl border border-[#dfdcd4] bg-white px-4 text-inherit"
             download

@@ -2,8 +2,10 @@ import {
   compareTimestampsDescending,
   formatKindergartenDateTime,
   formatKindergartenTime,
+  getKindergartenTodayKey,
   getKindergartenYearMonth,
   isKindergartenToday,
+  kindergartenMonthStartKey,
   parseApiTimestamp,
 } from "./date-time";
 
@@ -34,5 +36,14 @@ describe("date-time", () => {
   it("uses the Beijing month for monthly export", () => {
     expect(getKindergartenYearMonth(new Date("2026-07-31T16:30:00Z")))
       .toEqual({ year: 2026, month: 8 });
+  });
+
+  it("derives today and month-start keys for the search shortcuts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T16:00:00Z"));
+    // 北京已是 08-24 凌晨，跨 UTC 日期也按北京算“今天”
+    expect(getKindergartenTodayKey()).toBe("2026-08-24");
+    expect(kindergartenMonthStartKey(getKindergartenTodayKey())).toBe("2026-08-01");
+    vi.useRealTimers();
   });
 });

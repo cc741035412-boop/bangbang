@@ -5,6 +5,7 @@ import { ObservationDetailPage } from "./observation-detail-page";
 
 const mocks = vi.hoisted(() => ({
   exportFile: vi.fn(),
+  deleteObservation: vi.fn(),
 }));
 
 const record = {
@@ -46,6 +47,7 @@ vi.mock("../features/observations/api", async (importOriginal) => {
     ...actual,
     useObservation: () => ({ data: record, isLoading: false, isError: false }),
     useIndicators: () => ({ data: [{ indicator_code: "PHY-01", dimension: "身体参与" }] }),
+    useDeleteObservation: () => ({ mutate: mocks.deleteObservation, isPending: false }),
   };
 });
 

@@ -14,8 +14,9 @@ from pathlib import Path
 from uuid import uuid4
 from datetime import date, datetime, timedelta
 from io import BytesIO
-from typing import Optional, List, Literal
+from typing import Optional, List, Dict, Literal
 from urllib.parse import quote
+import base64
 import hashlib
 import re
 import secrets
@@ -28,7 +29,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from models import (
@@ -58,8 +59,10 @@ from export_service import (
     build_observation_pdf,
     child_names,
     kindergarten_datetime,
+    KINDERGARTEN_TIMEZONE,
 )
 import ai_service
+import asr_service
 
 app = FastAPI(
     title="帮帮师记 API",
@@ -99,6 +102,7 @@ EXTENSION_TYPES = {
 }
 FALLBACK_CONTENT_TYPES = {"", "application/octet-stream"}
 MAX_SIZE = 200 * 1024 * 1024  # 200MB
+MAX_DURATION_SEC = 180  # 建议 1~3 分钟；超过会明显降低白描质量，直接拒绝上传
 THUMBNAIL_SIZE = 480
 
 
@@ -526,6 +530,174 @@ def get_thumbnail_path(stored_filename: str) -> Path:
     return UPLOAD_DIR / f"{stored_filename}.thumbnail.png"
 
 
+def _frame_is_blank(data_uri: str) -> bool:
+    """判断一帧是否是无内容帧（近乎纯黑 / 纯白 / 几乎没有纹理）。
+
+    用 Pillow 解码成灰度、缩到小尺寸后统计均值与标准差：
+      - 标准差极小（画面几乎无变化，如纯色/纯黑/纯白）→ 空白；
+      - 极暗或极亮且纹理很少 → 空白。
+    Pillow 不可用时返回 False（宁可多保留一帧，也不误删真实画面）。
+    """
+    try:
+        from PIL import Image
+        raw = base64.b64decode(data_uri.split(",", 1)[1])
+        img = Image.open(BytesIO(raw)).convert("L")
+        img.thumbnail((64, 64))
+        hist = img.histogram()
+        total = sum(hist)
+        if total == 0:
+            return False
+        mean = sum(i * hist[i] for i in range(256)) / total
+        if total > 1:
+            variance = sum(hist[i] * (i - mean) ** 2 for i in range(256)) / (total - 1)
+        else:
+            variance = 0.0
+        std = variance ** 0.5
+        if std < 10:
+            return True
+        if (mean < 15 or mean > 240) and std < 30:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _blank_fallback_offsets(t: float, duration: float, max_search: int = 8) -> List[float]:
+    """空白帧的候选重采样偏移（秒），朝素材"有内容的方向"扫并回到边界内。"""
+    offsets: List[float] = []
+    if t <= 0.1:  # 开头空白 → 往后找
+        offsets = [float(i) for i in range(1, max_search + 1)]
+    elif t >= duration - 0.2:  # 结尾空白 → 往前找
+        offsets = [-float(i) for i in range(1, max_search + 1)]
+    else:  # 中间空白 → 先往后再往前
+        for i in range(1, max_search + 1):
+            offsets.append(float(i))
+            offsets.append(-float(i))
+    return offsets[:max_search]
+
+
+def _grab_frame(exe: str, source: Path, t: float, duration: float) -> Optional[str]:
+    """在时间点 t 抽 1 帧 PNG，返回 data_uri；失败返回 None。时间自动钳制在素材范围内。"""
+    tt = max(0.0, min(t, max(0.0, duration - 0.05)))
+    r = subprocess.run(
+        [exe, "-y", "-ss", str(tt), "-i", str(source),
+         "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"],
+        capture_output=True, timeout=60,
+    )
+    if r.returncode == 0 and r.stdout:
+        return "data:image/png;base64," + base64.b64encode(r.stdout).decode("ascii")
+    return None
+
+
+def _probe_video_duration(path: Path) -> Optional[float]:
+    """用 ffmpeg 探测视频时长（秒）；失败返回 None。"""
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        probe = subprocess.run(
+            [exe, "-i", str(path)], capture_output=True, text=True, timeout=30
+        )
+        for line in probe.stderr.splitlines():
+            if "Duration:" in line:
+                m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+                if m:
+                    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        return None
+    return None
+
+
+def _extract_video_frames(source: Path, count: int = 10) -> List[Dict]:
+    """用 ffmpeg 从视频里按时间均匀抽几帧，返回 [{timestamp_sec, data_uri}]。
+
+    依赖 imageio-ffmpeg（pip 自带 ffmpeg 二进制，无需系统安装）。
+    - 在 0 ~ 时长 之间均匀采 count 个点（含首尾），帧间覆盖更充分；
+    - 空白帧（纯黑/纯白/无内容）会在附近重采样，尽量覆盖有内容的画面；
+    - 抽帧失败或不是合法视频时返回空列表（调用方降级到 mock）。
+    """
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return []
+
+    try:
+        probe = subprocess.run(
+            [exe, "-i", str(source)], capture_output=True, text=True, timeout=30
+        )
+        duration = None
+        for line in probe.stderr.splitlines():
+            if "Duration:" in line:
+                m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+                if m:
+                    hours, minutes, seconds = m.group(1), m.group(2), m.group(3)
+                    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+                break
+        if not duration or duration <= 0:
+            return []
+
+        if count <= 1:
+            timestamps = [0.0]
+        else:
+            last = max(0.0, duration - 0.1)
+            timestamps = [duration * i / (count - 1) for i in range(count)]
+            timestamps[0] = 0.0
+            timestamps[-1] = last
+
+        frames: List[Dict] = []
+        for t in timestamps:
+            data_uri = _grab_frame(exe, source, t, duration)
+            if data_uri is None:
+                continue
+            if _frame_is_blank(data_uri):
+                # 该时间点是空白帧 → 在附近重采样，取一帧有内容的
+                replaced = False
+                for delta in _blank_fallback_offsets(t, duration):
+                    alt = _grab_frame(exe, source, t + delta, duration)
+                    if alt is not None and not _frame_is_blank(alt):
+                        frames.append({"timestamp_sec": round(t + delta, 1), "data_uri": alt})
+                        replaced = True
+                        break
+                if not replaced:
+                    # 实在找不到有内容的帧 → 保留原帧，交给提示词"跳过不写"
+                    frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
+            else:
+                frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
+
+        frames.sort(key=lambda f: f["timestamp_sec"])
+        return frames
+    except Exception:
+        return []
+
+
+def _media_vision_frames(media: Media) -> Optional[List[Dict]]:
+    """把素材转成"视觉模型可用的画面帧列表"，供豆包白描使用。
+
+    - 图片：用原图（1 帧）。
+    - 视频：用 ffmpeg 按时间均匀抽 10 帧，按时间顺序给模型。
+    返回 None 表示没有任何可用画面（调用方降级到 mock）。
+    每个元素形如 {"timestamp_sec": float|None, "data_uri": "data:image/...;base64,xxx"}。
+    """
+    if media.content_type.startswith("image/"):
+        path = UPLOAD_DIR / media.stored_filename
+        if not path.is_file():
+            return None
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        return [{
+            "timestamp_sec": None,
+            "data_uri": f"data:{media.content_type};base64,{base64.b64encode(raw).decode('ascii')}",
+        }]
+
+    source = UPLOAD_DIR / media.stored_filename
+    if not source.is_file():
+        return None
+    frames = _extract_video_frames(source, count=10)
+    return frames or None
+
+
 def get_thumbnail_error_path(stored_filename: str) -> Path:
     return UPLOAD_DIR / f"{stored_filename}.thumbnail-error.txt"
 
@@ -650,10 +822,16 @@ def authenticated_account(
         or auth_session.revoked_at is not None
         or auth_session.expires_at <= now
     ):
-        raise HTTPException(401, "登录已失效，请重新登录")
+        if required:
+            raise HTTPException(401, "登录已失效，请重新登录")
+        # 可选鉴权（required=False）：token 过期/失效按匿名处理，
+        # 避免因浏览器残留的旧 token 把整页查询打成 401（如今日素材页）。
+        return None
     account = session.get(Account, auth_session.account_id)
     if not account or account.deleted_at is not None:
-        raise HTTPException(401, "账号已注销或登录已失效")
+        if required:
+            raise HTTPException(401, "账号已注销或登录已失效")
+        return None
     return account, auth_session
 
 
@@ -1197,10 +1375,26 @@ def list_areas():
 
 
 @app.get("/children", response_model=List[ChildResponse], tags=["基础"])
-def list_children():
-    """所有小朋友"""
+def list_children(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """幼儿列表。
+
+    带登录态时只返回当前教师班级的幼儿，与「新增/删除幼儿只能作用于本班」保持一致；
+    无登录态时（demo 脚本、未开启登录的旧流程）返回全部，便于演示兼容。
+    """
     with Session(engine) as s:
-        return s.exec(select(Child)).all()
+        auth = authenticated_account(s, request, authorization, required=False)
+        if auth is None:
+            return s.exec(select(Child)).all()
+        account, _ = auth
+        teacher = s.get(Teacher, account.teacher_id)
+        if not teacher:
+            return []
+        return s.exec(
+            select(Child).where(Child.classroom_id == teacher.classroom_id)
+        ).all()
 
 
 @app.post("/children", status_code=201, tags=["基础"])
@@ -1471,7 +1665,20 @@ async def upload_media(
         stored_path.unlink(missing_ok=True)
         raise
 
+    # 视频：探测真实时长；超过建议上限（3 分钟）直接拒绝，避免拉低白描质量。并回填真实时长。
+    real_duration_sec = duration_sec
     if content_type.startswith("video/"):
+        probed = _probe_video_duration(stored_path)
+        if probed is not None:
+            real_duration_sec = int(round(probed))
+        elif duration_sec is None:
+            real_duration_sec = None
+        if probed is not None and probed > MAX_DURATION_SEC:
+            stored_path.unlink(missing_ok=True)
+            raise HTTPException(
+                422,
+                "视频太长了，建议录 1~3 分钟的片段。超过 3 分钟会影响白描效果，请缩短后再上传。",
+            )
         generate_video_thumbnail(stored_path)
 
     with Session(engine) as s:
@@ -1479,7 +1686,7 @@ async def upload_media(
             stored_filename=stored_filename,
             content_type=content_type,
             size=size,
-            duration_sec=duration_sec,
+            duration_sec=real_duration_sec,
         )
         s.add(media)
         s.commit()
@@ -1615,6 +1822,28 @@ def create_observation(
         return observation
 
 
+def observed_at_day_bounds(
+    date_from: Optional[date],
+    date_to: Optional[date],
+):
+    """观察日期（北京时间自然日）→ 半开时间区间 [起, 止+1 天)。
+
+    观察文书统一按 Asia/Shanghai 展示与判断日期（“今天”“本月”都是这么算的），
+    检索也必须用同一把尺子：date_from/date_to 指幼儿园当地的自然日，
+    这里把“当地零点”换算成明确的 UTC 时刻交给 SQL 比较，
+    避免在 Python 里把整表拉下来再逐条转时区。
+    返回的 datetime 都带 Asia/Shanghai 时区；绑定参数时 UTCDateTime 会统一转 UTC。
+    """
+    def local_day_start(day: date) -> datetime:
+        return datetime(day.year, day.month, day.day, tzinfo=KINDERGARTEN_TIMEZONE)
+
+    start = local_day_start(date_from) if date_from is not None else None
+    end_exclusive = (
+        local_day_start(date_to + timedelta(days=1)) if date_to is not None else None
+    )
+    return start, end_exclusive
+
+
 @app.get(
     "/observations",
     response_model=List[ObservationResponse],
@@ -1622,12 +1851,55 @@ def create_observation(
 )
 def list_observations(
     status: Optional[ObservationStatus] = Query(None, description="按处理状态过滤"),
+    child_id: Optional[int] = Query(
+        None, description="按幼儿过滤：该幼儿是主角或关联幼儿的记录都会返回"
+    ),
+    area_id: Optional[int] = Query(None, description="按游戏区域过滤"),
+    date_from: Optional[date] = Query(
+        None,
+        description="观察日期（北京时间）起始日，含当天，格式 YYYY-MM-DD",
+    ),
+    date_to: Optional[date] = Query(
+        None,
+        description="观察日期（北京时间）截止日，含当天，格式 YYYY-MM-DD",
+    ),
 ):
-    """所有观察记录（简要），可按状态过滤。"""
+    """所有观察记录（简要），可按状态 / 幼儿 / 区域 / 观察日期区间组合过滤。"""
+    if (
+        date_from is not None
+        and date_to is not None
+        and date_from > date_to
+    ):
+        raise HTTPException(422, "date_from 不能晚于 date_to")
     with Session(engine) as s:
+        if child_id is not None and s.get(Child, child_id) is None:
+            raise HTTPException(404, f"找不到 id={child_id} 的幼儿")
+        if area_id is not None and s.get(Area, area_id) is None:
+            raise HTTPException(404, f"找不到 id={area_id} 的游戏区域")
+
         statement = select(Observation)
         if status is not None:
             statement = statement.where(Observation.status == status)
+        if area_id is not None:
+            statement = statement.where(Observation.area_id == area_id)
+        if child_id is not None:
+            # 多人素材会写 observation_child 关联表；老记录可能只落 observation.child_id。
+            # 两边都认，才能保证“按幼儿检索”不漏旧数据。
+            linked_ids = select(ObservationChild.observation_id).where(
+                ObservationChild.child_id == child_id
+            )
+            statement = statement.where(
+                or_(
+                    Observation.id.in_(linked_ids),
+                    Observation.child_id == child_id,
+                )
+            )
+        if date_from is not None or date_to is not None:
+            start, end_exclusive = observed_at_day_bounds(date_from, date_to)
+            if start is not None:
+                statement = statement.where(Observation.observed_at >= start)
+            if end_exclusive is not None:
+                statement = statement.where(Observation.observed_at < end_exclusive)
         return s.exec(statement).all()
 
 
@@ -1783,6 +2055,64 @@ def confirm_observation(obs_id: int):
         return {"ok": True, "observation": obs, "accepted_tag_count": len(accepted)}
 
 
+@app.delete("/observations/{obs_id}", status_code=204, tags=["2·观察记录"])
+def delete_observation(
+    obs_id: int,
+    request: Request,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+):
+    """删除一条观察记录及其全部数据。
+
+    用于清理导入的测试记录：会一并删除该记录绑定的素材（含磁盘文件）、
+    观察指标、多人关联和 AI 调用审计。属于明确的"整条记录做删除"。
+    """
+    with Session(engine) as s:
+        account, _ = authenticated_account(s, request, authorization)
+        obs = s.get(Observation, obs_id)
+        if not obs:
+            raise HTTPException(404, "观察记录不存在")
+
+        # 说明：观察记录列表本身不按班级隔离（演示环境所有记录可见），
+        # 因此删除也不按班级拦截，方便教师清理导入的测试记录。
+        # 观察记录删除属于"整条记录清理"，不做级联 / 二次确认的额外参数。
+        # 素材：删除数据库记录 + 磁盘文件与缩略图
+        media_list = s.exec(
+            select(Media).where(Media.observation_id == obs_id)
+        ).all()
+        for media in media_list:
+            for path in (
+                UPLOAD_DIR / media.stored_filename,
+                get_thumbnail_path(media.stored_filename),
+                get_thumbnail_error_path(media.stored_filename),
+            ):
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except OSError:
+                    pass
+            s.delete(media)
+
+        # 关联表 / 指标 / AI 审计
+        for link in s.exec(
+            select(ObservationChild).where(ObservationChild.observation_id == obs_id)
+        ).all():
+            s.delete(link)
+        for tag in s.exec(
+            select(ObservationTag).where(ObservationTag.observation_id == obs_id)
+        ).all():
+            s.delete(tag)
+        for run in s.exec(
+            select(AIRun).where(AIRun.observation_id == obs_id)
+        ).all():
+            s.delete(run)
+
+        s.delete(obs)
+        s.commit()
+    response.status_code = 204
+    return response
+
+
 # ============================================================
 # 3. AI 环节（当前为 DEMO MOCK）
 # ============================================================
@@ -1814,11 +2144,32 @@ def generate_narrative(obs_id: int):
         s.commit()
         s.refresh(obs)
 
+        vision_frames = _media_vision_frames(media)
+
+        # 音频转写：仅视频抽取语音（照片无音轨）；失败降级为 mock，不影响白描。
+        transcript = None
+        asr = None
+        if media.content_type.startswith("video/"):
+            media_path = UPLOAD_DIR / media.stored_filename
+            if media_path.is_file():
+                asr = asr_service.transcribe_video(media_path)
+                if asr and not asr.get("is_mock"):
+                    transcript = asr.get("transcript")
+
+        # 观察对象幼儿数量（老师选择的），决定白描描写哪几位主体；未选时默认 1。
+        child_count_hint = len(s.exec(
+            select(ObservationChild).where(ObservationChild.observation_id == obs_id)
+        ).all()) or 1
+
         try:
             result = ai_service.generate_narrative(
                 area_code=area.code if area else "",
+                area_name=area.name if area else None,
                 media_type=obs.media_type,
                 duration_sec=media.duration_sec,
+                frames=vision_frames,
+                transcript=transcript,
+                child_count_hint=child_count_hint,
             )
         except Exception as exc:
             transition_observation(
@@ -1835,6 +2186,8 @@ def generate_narrative(obs_id: int):
         obs.narrative_source = "ai"
         transition_observation(obs, "ready_for_review")
         s.add(obs)
+        if result.get("ai_run"):
+            s.add(AIRun(observation_id=obs_id, **result["ai_run"]))
         s.commit()
         s.refresh(obs)
 
@@ -1847,6 +2200,7 @@ def generate_narrative(obs_id: int):
             "is_mock": result["is_mock"],
             "engine": result["engine"],
             "notice": result["notice"],
+            "asr": asr,
         }
 
 

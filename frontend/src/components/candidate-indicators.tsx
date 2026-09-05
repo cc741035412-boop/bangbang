@@ -226,7 +226,7 @@ function IndicatorCard({
         </div>
 
         <div className="mt-3 rounded-r-xl border-l-2 border-brand/20 bg-stone-50 px-3 py-2.5">
-          <p className="text-[11px] text-stone-400">对应原文</p>
+          <p className="text-[11px] text-stone-400">{systemDetermined ? "判定依据" : "对应原文"}</p>
           <p className="mt-1 text-[13px] leading-6 text-ink-muted">{tag.ai_reason || "基于客观数据判定，请结合原素材核对。"}</p>
         </div>
 

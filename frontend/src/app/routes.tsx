@@ -12,6 +12,7 @@ import { MinePage } from "../pages/mine-page";
 import { MonthMediaPage } from "../pages/month-media-page";
 import { ObservationDetailPage } from "../pages/observation-detail-page";
 import { ObservationReviewPage } from "../pages/observation-review-page";
+import { RecordSearchPage } from "../pages/record-search-page";
 import { SettingsPage } from "../pages/settings-page";
 import { TodayMediaPage } from "../pages/today-media-page";
 
@@ -33,6 +34,7 @@ export function AppRoutes() {
         element={<Guarded><ObservationDetailPage /></Guarded>}
         path="observations/:observationId"
       />
+      <Route element={<Guarded><RecordSearchPage /></Guarded>} path="records" />
       <Route element={<Guarded><SettingsPage /></Guarded>} path="settings" />
 
       {/* 以下页面在 src/config/features.ts 对应开关为 false 时会自行跳回 /mine，

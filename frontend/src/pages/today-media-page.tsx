@@ -53,7 +53,7 @@ export function TodayMediaPage() {
 
         <div className="mt-5">
           {isLoading && <p className="py-20 text-center text-sm text-ink-muted">正在看看今天的素材…</p>}
-          {hasError && <button className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 text-sm font-medium text-red-700" onClick={() => void observations.refetch()} type="button"><RotateCcw size={16} /> 加载失败，点这里重试</button>}
+          {hasError && <button className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 text-sm font-medium text-red-700" onClick={() => void Promise.all([observations.refetch(), areas.refetch(), children.refetch(), media.refetch()])} type="button"><RotateCcw size={16} /> 加载失败，点这里重试</button>}
           {!isLoading && !hasError && todayRecords.length === 0 && (
             <section className="flex min-h-[48vh] flex-col items-center justify-center text-center">
               <div className="grid size-20 place-items-center rounded-[26px] bg-white text-brand shadow-sm"><ImageIcon aria-hidden size={34} /></div>

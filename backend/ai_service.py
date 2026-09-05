@@ -1,4 +1,4 @@
-"""AI 服务层：工作流 A 保持 mock，工作流 B 可切换 DeepSeek 或规则降级。"""
+"""AI 服务层：工作流 A（白描）可切豆包视觉或 mock，工作流 B 可切 DeepSeek 或规则降级。"""
 
 import json
 import re
@@ -7,8 +7,20 @@ from typing import List, Dict, Optional
 
 import httpx
 
-from config import AI_MODE, DEEPSEEK_API_KEY, DEEPSEEK_API_URL
+from config import (
+    AI_MODE,
+    ARK_API_KEY,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_API_URL,
+    DOUBAO_VISION_API_URL,
+    DOUBAO_VISION_MODEL,
+    VISION_MODE,
+)
 from indicators import INDICATORS, AREA_PRIOR, DEFAULT_PRIOR
+from prompts.workflow_a_vision_v1 import (
+    PROMPT_VERSION as VISION_PROMPT_VERSION,
+    render_user_prompt as render_vision_user_prompt,
+)
 from prompts.workflow_b_v2 import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -66,10 +78,169 @@ _MOCK_DEFAULT_NARRATIVE = (
 )
 
 
+# 豆包视觉相关参数
+DOUBAO_VISION_TEMPERATURE = 0.3   # 客观白描，低温避免发散
+DOUBAO_VISION_TIMEOUT_SECONDS = 60.0
+DOUBAO_VISION_MAX_ATTEMPTS = 2    # 首次失败后重试 1 次
+
+
+def _mock_narrative(area_code: str, media_type: str, duration_sec: Optional[int]) -> Dict:
+    """演示用 mock 白描。"""
+    text = _MOCK_NARRATIVES.get(area_code, _MOCK_DEFAULT_NARRATIVE)
+    if media_type == "video" and duration_sec:
+        minutes = duration_sec // 60
+        text += f"（本段素材时长约 {minutes} 分 {duration_sec % 60} 秒。）"
+    return {
+        "narrative": text,
+        "is_mock": True,
+        "engine": "demo-mock-v1",
+        "notice": "⚠️ 这是演示用的模拟白描，未调用真实 AI。接入大模型后此处会替换为真实生成结果。",
+    }
+
+
+def _extract_response_text(payload: Dict) -> Optional[str]:
+    """从火山方舟 /responses 响应里取出白描文本（多模态 output_text）。"""
+    if not isinstance(payload, dict):
+        return None
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            contents = item.get("content")
+            if isinstance(contents, list):
+                for c in contents:
+                    if isinstance(c, dict) and c.get("type") == "output_text":
+                        text = c.get("text")
+                        if isinstance(text, str) and text.strip():
+                            return text.strip()
+    # 兜底：顶层 text / message.content 直接是字符串的变体。
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    content = payload.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    return None
+
+
+def _doubao_vision_or_fallback(
+    *,
+    area_code: str,
+    area_name: Optional[str],
+    media_type: str,
+    duration_sec: Optional[int],
+    frames: Optional[List[Dict]],
+    transcript: Optional[str] = None,
+    child_count_hint: Optional[int] = None,
+) -> Dict:
+    """用豆包视觉生成客观白描（图片或多帧视频画面）；失败时永远降级到 mock。
+
+    frames 是视觉模型可用的画面帧列表，每项形如
+      {"timestamp_sec": float|None, "data_uri": "data:image/...;base64,xxx"}
+    按时间顺序排列（视频抽首/中/尾三帧）。无画面时不调用模型，直接降级。
+    child_count_hint: 观察对象幼儿数量，让白描只描写这几位主体，其余不写。
+    """
+    started_at = utc_now()
+    started_clock = perf_counter()
+    user_prompt = render_vision_user_prompt(
+        area_name=area_name or area_code,
+        media_type=media_type,
+        duration_sec=duration_sec,
+        frames=frames or [],
+        transcript=transcript,
+        child_count_hint=child_count_hint,
+    )
+    content: List[Dict] = []
+    if frames:
+        for frame in frames:
+            content.append({"type": "input_image", "image_url": frame["data_uri"]})
+    content.append({"type": "input_text", "text": user_prompt})
+    request_body = {
+        "model": DOUBAO_VISION_MODEL,
+        "input": [{"role": "user", "content": content}],
+    }
+
+    errors = []
+    last_raw = None
+    if not ARK_API_KEY:
+        errors.append("ARK_API_KEY 未配置")
+    elif not frames:
+        errors.append("没有可用的画面输入（图片/视频抽帧），无法调用视觉模型")
+    else:
+        for attempt in range(1, DOUBAO_VISION_MAX_ATTEMPTS + 1):
+            try:
+                response = httpx.post(
+                    DOUBAO_VISION_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {ARK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_body,
+                    timeout=DOUBAO_VISION_TIMEOUT_SECONDS,
+                )
+                last_raw = _safe_response_json(response)
+                response.raise_for_status()
+                narrative = _extract_response_text(last_raw)
+                if not narrative:
+                    raise ValueError("豆包视觉未返回可用文本")
+                return {
+                    "narrative": narrative,
+                    "is_mock": False,
+                    "engine": DOUBAO_VISION_MODEL,
+                    "notice": "客观白描由豆包视觉生成，请教师按实际情况核对。",
+                    "ai_run": {
+                        "workflow": "narrative",
+                        "provider": "doubao",
+                        "model": DOUBAO_VISION_MODEL,
+                        "prompt_version": VISION_PROMPT_VERSION,
+                        "status": "completed",
+                        "started_at": started_at,
+                        "completed_at": utc_now(),
+                        "latency_ms": round((perf_counter() - started_clock) * 1000),
+                        "response_raw": last_raw,
+                        "error_reason": None,
+                        "is_mock": False,
+                        "prompt_rendered": user_prompt,
+                        "token_usage": last_raw.get("usage"),
+                        "temperature": DOUBAO_VISION_TEMPERATURE,
+                    },
+                }
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                errors.append(f"第 {attempt} 次调用失败：{exc}")
+
+    fallback = _mock_narrative(area_code, media_type, duration_sec)
+    fallback.update({
+        "notice": "⚠️ 豆包视觉暂时不可用，已自动使用演示白描。",
+        "ai_run": {
+            "workflow": "narrative",
+            "provider": "doubao",
+            "model": DOUBAO_VISION_MODEL,
+            "prompt_version": VISION_PROMPT_VERSION,
+            "status": "failed",
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "latency_ms": round((perf_counter() - started_clock) * 1000),
+            "response_raw": last_raw,
+            "error_reason": "; ".join(errors),
+            "is_mock": True,
+            "prompt_rendered": user_prompt,
+            "token_usage": last_raw.get("usage") if last_raw else None,
+            "temperature": DOUBAO_VISION_TEMPERATURE,
+        },
+    })
+    return fallback
+
+
 def generate_narrative(
     area_code: str,
     media_type: str,
     duration_sec: Optional[int] = None,
+    *,
+    area_name: Optional[str] = None,
+    frames: Optional[List[Dict]] = None,
+    transcript: Optional[str] = None,
+    child_count_hint: Optional[int] = None,
 ) -> Dict:
     """
     根据素材生成客观白描。
@@ -83,24 +254,21 @@ def generate_narrative(
         "notice": str,         # 给用户看的提示语
       }
 
-    真实实现时替换这里：调 Dify 工作流 A，提示词要点见项目文档
-      - 只描述看得见的动作、材料、语言、时长
-      - 禁止评价性词汇（认真/专注/聪明/良好/较弱/有进步）
-      - 禁止推测意图和情绪，除非有明确表情或语言证据
-      - 用「幼儿A」「幼儿B」指代，不用真实姓名
+    当 BANGBANG_VISION_MODE=doubao 且提供 frames（一帧或多帧视频画面）时走豆包视觉；
+    其余情况或失败时都降级 mock。提示词约束见 prompts/workflow_a_vision_v1.py。
+    child_count_hint 决定白描只描写哪几位观察对象幼儿。
     """
-    text = _MOCK_NARRATIVES.get(area_code, _MOCK_DEFAULT_NARRATIVE)
-
-    if media_type == "video" and duration_sec:
-        minutes = duration_sec // 60
-        text += f"（本段素材时长约 {minutes} 分 {duration_sec % 60} 秒。）"
-
-    return {
-        "narrative": text,
-        "is_mock": True,
-        "engine": "demo-mock-v1",
-        "notice": "⚠️ 这是演示用的模拟白描，未调用真实 AI。接入大模型后此处会替换为真实生成结果。",
-    }
+    if VISION_MODE == "doubao":
+        return _doubao_vision_or_fallback(
+            area_code=area_code,
+            area_name=area_name,
+            media_type=media_type,
+            duration_sec=duration_sec,
+            frames=frames,
+            transcript=transcript,
+            child_count_hint=child_count_hint,
+        )
+    return _mock_narrative(area_code, media_type, duration_sec)
 
 
 # ============================================================
@@ -158,6 +326,33 @@ def _check_quant_rule(rule: Optional[Dict], duration_sec: Optional[int]) -> bool
     return False
 
 
+def _human_seconds(sec: int) -> str:
+    """把秒数换算成老师好读的时长表述。"""
+    if sec % 60 == 0:
+        return f"{sec // 60} 分钟"
+    if sec >= 60:
+        return f"{sec // 60} 分 {sec % 60} 秒"
+    return f"{sec} 秒"
+
+
+def _build_quant_basis(rule: Dict, duration_sec: int, indicator_name: str, level: int) -> str:
+    """把纯计算命中的内部规则翻译成老师能看懂的判定依据。
+
+    纯计算命中（如视频时长分界）不再直接把规则公式漏给老师，
+    而是给出一句可读的判定理由。
+    """
+    level_name = {1: "初阶", 2: "中阶", 3: "高阶"}.get(level, f"第 {level} 阶")
+    if rule.get("field") == "duration_sec":
+        value = rule["value"]
+        op_desc = "<" if rule["op"] == "<" else ("≥" if rule["op"] == ">=" else rule["op"])
+        return (
+            f"本段素材为视频，时长 {_human_seconds(duration_sec)}，"
+            f"{op_desc} {_human_seconds(value)}，"
+            f"符合「{indicator_name}·{level_name}」的判定规则。"
+        )
+    return f"符合「{indicator_name}·{level_name}」的判定规则。"
+
+
 def _suggest_indicators_mock(
     narrative: str,
     area_code: str,
@@ -197,7 +392,7 @@ def _suggest_indicators_mock(
                     "indicator_name": item["name"],
                     "level": level,
                     "level_desc": detail["desc"],
-                    "basis": f"duration_sec={duration_sec} 满足规则 {detail['quant_rule']['op']} {detail['quant_rule']['value']}",
+                    "basis": _build_quant_basis(detail["quant_rule"], duration_sec, item["name"], level),
                     "deterministic": True,
                 })
 

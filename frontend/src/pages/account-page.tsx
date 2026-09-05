@@ -1,7 +1,8 @@
-import { ArrowLeft, LoaderCircle, LogOut, ShieldAlert, Smartphone } from "lucide-react";
+import { LoaderCircle, LogOut, ShieldAlert, Smartphone } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router";
+import { Navigate, useNavigate } from "react-router";
 
+import { BackButton } from "../components/back-button";
 import { MobilePage } from "../components/mobile-page";
 import { isCode, isPhone, useChangePhone, useDeleteAccount, useLogout, useSendCode } from "../features/auth/api";
 import { useAuth } from "../features/auth/auth-context-value";
@@ -246,13 +247,10 @@ function useCodeRequest() {
 export function PageHeader({ subtitle, title }: { subtitle?: string; title: string }) {
   return (
     <header className="flex items-center gap-3">
-      <Link
-        aria-label="返回"
+      <BackButton
         className="grid size-11 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-sm"
-        to="/mine"
-      >
-        <ArrowLeft size={22} />
-      </Link>
+        label="返回上一页"
+      />
       <div>
         <h1 className="text-2xl font-bold">{title}</h1>
         {subtitle && <p className="mt-1 text-sm text-ink-muted">{subtitle}</p>}

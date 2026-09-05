@@ -31,3 +31,35 @@ if AI_MODE not in {"mock", "deepseek"}:
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+
+# ---- 工作流 A（客观白描）多模态视觉配置 ----
+# 默认 mock；接入豆包视觉时在 .env 里设为 doubao。
+VISION_MODE = os.getenv("BANGBANG_VISION_MODE", "mock").strip().lower()
+if VISION_MODE not in {"mock", "doubao"}:
+    raise ValueError("BANGBANG_VISION_MODE 只能是 mock 或 doubao")
+
+# 火山方舟（豆包）视觉模型。
+ARK_API_KEY = os.getenv("BANGBANG_ARK_API_KEY", "")
+DOUBAO_VISION_MODEL = os.getenv(
+    "BANGBANG_DOUBAO_VISION_MODEL", "doubao-seed-1-6-vision-250815"
+)
+DOUBAO_VISION_API_URL = os.getenv(
+    "BANGBANG_DOUBAO_VISION_API_URL",
+    "https://ark.cn-beijing.volces.com/api/v3/responses",
+)
+
+# ---- 工作流 A 配套：音频转写（ASR，复用火山方舟豆包多模态 & 同一把 ark Key）----
+# 默认 mock（demo 阶段不真转写）；接入后在 .env 设为 doubao。
+ASR_MODE = os.getenv("BANGBANG_ASR_MODE", "mock").strip().lower()
+if ASR_MODE == "volc":  # 兼容旧命名（语音控制台），实际也走方舟豆包
+    ASR_MODE = "doubao"
+if ASR_MODE not in {"mock", "doubao"}:
+    raise ValueError("BANGBANG_ASR_MODE 只能是 mock 或 doubao")
+
+ASR_API_KEY = ARK_API_KEY  # 复用方舟 ark Key
+ASR_MODEL = os.getenv("BANGBANG_ASR_MODEL", DOUBAO_VISION_MODEL)  # 默认复用视觉接入点（已验证支持音频）
+ASR_API_URL = os.getenv(
+    "BANGBANG_ASR_API_URL",
+    "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+)
+ASR_TIMEOUT_SECONDS = int(os.getenv("BANGBANG_ASR_TIMEOUT_SECONDS", "120"))

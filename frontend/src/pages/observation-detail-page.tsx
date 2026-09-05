@@ -1,7 +1,8 @@
-import { ArrowDown, ArrowLeft, Download, FileText, Home, LoaderCircle, Share2, X } from "lucide-react";
+import { ArrowDown, Download, FileText, Home, LoaderCircle, Share2, Trash2, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
+import { BackButton } from "../components/back-button";
 import { MobilePage } from "../components/mobile-page";
 import { ExportFormatSheet } from "../components/export-format-sheet";
 import {
@@ -14,6 +15,7 @@ import {
   type ExportFormat,
 } from "../features/exports/api";
 import {
+  useDeleteObservation,
   useIndicators,
   useObservation,
   type ObservationTag,
@@ -27,12 +29,16 @@ const DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
 export function ObservationDetailPage() {
   const { observationId } = useParams();
   const id = Number(observationId);
+  const navigate = useNavigate();
   const observation = useObservation(id);
+  const deleteObservation = useDeleteObservation(id);
   const indicators = useIndicators();
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [exportedFile, setExportedFile] = useState<ExportedFile | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat | null>(firstEnabledFormat());
   const record = observation.data;
   const dimensions = useMemo(
@@ -78,7 +84,7 @@ export function ObservationDetailPage() {
     <MobilePage>
       <article className="min-h-dvh bg-[#f7f6f1] pb-36">
         <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b border-stone-200/80 bg-[#f7f6f1]/95 px-5 backdrop-blur">
-          <Link aria-label="返回首页" className="grid size-10 place-items-center text-ink-muted" to="/"><ArrowLeft size={22} /></Link>
+          <BackButton className="grid size-10 place-items-center text-ink-muted" label="返回上一页" size={22} />
           <h1 className="text-xl font-bold">完整稿</h1>
           <span className="w-10 text-right text-sm text-ink-muted">已保存</span>
         </header>
@@ -117,9 +123,19 @@ export function ObservationDetailPage() {
         </div>
       </article>
 
-      <div className="safe-bottom fixed inset-x-0 bottom-0 z-20 mx-auto grid w-full max-w-[430px] grid-cols-[1fr_1.7fr] gap-3 border-t border-stone-200 bg-[#f7f6f1]/95 px-4 pt-3 backdrop-blur">
-        <Link className="flex min-h-14 items-center justify-center rounded-2xl border border-[#dedbd2] bg-white font-bold text-ink-muted" to={`/observations/${id}/review`}>返回编辑</Link>
-        <button className="min-h-14 rounded-2xl bg-brand font-bold text-white" onClick={() => setExportOpen(true)} type="button">导出</button>
+      <div className="safe-bottom fixed inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[430px] border-t border-stone-200 bg-[#f7f6f1]/95 px-4 pt-3 backdrop-blur">
+        <div className="grid grid-cols-[1fr_1.7fr] gap-3">
+          <Link className="flex min-h-14 items-center justify-center rounded-2xl border border-[#dedbd2] bg-white font-bold text-ink-muted" to={`/observations/${id}/review`}>返回编辑</Link>
+          <button className="min-h-14 rounded-2xl bg-brand font-bold text-white" onClick={() => setExportOpen(true)} type="button">导出</button>
+        </div>
+        <button
+          className="mt-2 flex min-h-11 w-full items-center justify-center gap-1.5 rounded-2xl border border-[#dfdcd4] bg-white font-medium text-[#b4453c] disabled:opacity-50"
+          disabled={deleteObservation.isPending}
+          onClick={() => { setDeleteError(""); setConfirmingDelete(true); }}
+          type="button"
+        >
+          <Trash2 size={16} /> 删除这条记录
+        </button>
       </div>
 
       {exportOpen && (
@@ -131,6 +147,37 @@ export function ObservationDetailPage() {
           onSelect={setSelectedFormat}
           selected={selectedFormat}
         />
+      )}
+
+      {confirmingDelete && (
+        <div className="fixed inset-0 z-30 flex items-end justify-center bg-black/35 p-4 sm:items-center" role="presentation">
+          <section aria-labelledby="delete-prompt-heading" aria-modal="true" className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-xl" role="dialog">
+            <h2 className="text-xl font-bold" id="delete-prompt-heading">删除这条记录？</h2>
+            <p className="mt-3 text-sm leading-6 text-ink-muted">会连同它绑定的素材、指标和 AI 记录一起删除，且不可恢复。</p>
+            {deleteError && <p className="mt-2 text-sm text-red-700" role="alert">{deleteError}</p>}
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <button
+                className="min-h-12 rounded-xl border border-[#dfdcd4] font-bold text-ink-muted"
+                disabled={deleteObservation.isPending}
+                onClick={() => setConfirmingDelete(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="min-h-12 rounded-xl bg-[#b4453c] font-bold text-white disabled:opacity-60"
+                disabled={deleteObservation.isPending}
+                onClick={() => deleteObservation.mutate(undefined, {
+                  onSuccess: () => navigate("/"),
+                  onError: (err) => setDeleteError((err as Error).message),
+                })}
+                type="button"
+              >
+                {deleteObservation.isPending ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </MobilePage>
   );

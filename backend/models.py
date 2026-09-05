@@ -155,7 +155,8 @@ class Observation(SQLModel, table=True):
 
     observed_at: datetime = Field(
         default_factory=utc_now,
-        sa_column=Column(UTCDateTime(), nullable=False),
+        # 检索按观察时间（北京时间自然日）过滤，观察量积累后靠这条索引避免全表扫。
+        sa_column=Column(UTCDateTime(), nullable=False, index=True),
     )
     age_group: str      # 快照：拍摄当时的年龄段。孩子会升班，历史记录的判定依据不能跟着变
     media_type: Optional[str] = None  # image / video；绑定首个素材时由 MIME 推断

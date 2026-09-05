@@ -20,6 +20,7 @@ from models import (
     ObservationChild,
     ObservationTag,
     SMSCode,
+    AIRun,
 )
 from time_utils import utc_now
 
@@ -269,6 +270,77 @@ class AuthFlowTest(unittest.TestCase):
         self.assertEqual(deleted.status_code, 204, deleted.text)
         with Session(self.engine) as session:
             self.assertIsNone(session.get(Child, empty.json()["id"]))
+
+    def test_list_children_scoped_to_teacher_classroom(self):
+        """幼儿列表应按当前教师班级过滤：本班的显示、别班的不显示，且不能 500。"""
+        registered = self.register("13800000006")
+        headers = self.bearer(registered["access_token"])
+        classroom_id = registered["account"]["classroom_id"]
+        with Session(self.engine) as session:
+            own_a = Child(name="本班幼儿A", classroom_id=classroom_id)
+            own_b = Child(name="本班幼儿B", classroom_id=classroom_id)
+            session.add(own_a)
+            session.add(own_b)
+            other_room = ClassRoom(name="大二班", age_group="large")
+            session.add(other_room)
+            session.flush()
+            session.add(Child(name="别班幼儿C", classroom_id=other_room.id))
+            session.commit()
+
+        resp = self.client.get("/children", headers=headers)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        names = {item["name"] for item in resp.json()}
+        self.assertIn("本班幼儿A", names)
+        self.assertIn("本班幼儿B", names)
+        self.assertNotIn("别班幼儿C", names, "列表不应包含其它班级的幼儿")
+
+    def test_list_children_anonymous_returns_all(self):
+        """无登录态（demo 脚本兼容）返回全部，且不应 500。"""
+        with Session(self.engine) as session:
+            area = Area(code="construction", name="建构区")
+            session.add(area)
+            session.commit()
+        resp = self.client.get("/children")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIsInstance(resp.json(), list)
+
+    def test_delete_observation_removes_record_and_dependents(self):
+        """删除观察记录应整条移除（204），并清掉其关联的指标/AI 审计。"""
+        registered = self.register("13800000010")
+        hdr = self.bearer(registered["access_token"])
+        area_id = None
+        with Session(self.engine) as session:
+            area = Area(code="construction", name="建构区")
+            session.add(area)
+            session.commit()
+            session.refresh(area)
+            area_id = area.id
+
+        created = self.client.post(
+            "/observations", headers=hdr,
+            json={"area_id": area_id, "note": "待删除的测试记录"},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        obs_id = created.json()["id"]
+
+        deleted = self.client.delete(f"/observations/{obs_id}", headers=hdr)
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+
+        with Session(self.engine) as session:
+            self.assertIsNone(session.get(Observation, obs_id))
+            tags = session.exec(
+                select(ObservationTag).where(ObservationTag.observation_id == obs_id)
+            ).all()
+            runs = session.exec(
+                select(AIRun).where(AIRun.observation_id == obs_id)
+            ).all()
+            self.assertEqual(tags, [])
+            self.assertEqual(runs, [])
+
+    def test_delete_observation_requires_auth(self):
+        """未登录不能删除观察记录（401）。"""
+        resp = self.client.delete("/observations/999")
+        self.assertEqual(resp.status_code, 401, resp.text)
 
     def test_multi_child_association_replaces_all_and_syncs_primary(self):
         registered = self.register("13800000007")

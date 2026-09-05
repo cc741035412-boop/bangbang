@@ -4,6 +4,125 @@
  */
 
 export interface paths {
+    "/auth/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send Auth Code */
+        post: operations["send_auth_code_auth_code_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Login */
+        post: operations["login_auth_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register */
+        post: operations["register_auth_register_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Auth Me */
+        get: operations["auth_me_auth_me_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Logout */
+        post: operations["logout_auth_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/phone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change Phone */
+        patch: operations["change_phone_auth_phone_patch"];
+        trace?: never;
+    };
+    "/auth/account": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Account */
+        delete: operations["delete_account_auth_account_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -19,6 +138,59 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/kindergartens/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Current Kindergarten */
+        get: operations["get_current_kindergarten_kindergartens_current_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Rename Current Kindergarten */
+        patch: operations["rename_current_kindergarten_kindergartens_current_patch"];
+        trace?: never;
+    };
+    "/classrooms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Classroom */
+        post: operations["create_classroom_classrooms_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/classrooms/{classroom_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Classroom */
+        delete: operations["delete_classroom_classrooms__classroom_id__delete"];
+        options?: never;
+        head?: never;
+        /** Rename Classroom */
+        patch: operations["rename_classroom_classrooms__classroom_id__patch"];
         trace?: never;
     };
     "/areas": {
@@ -50,9 +222,36 @@ export interface paths {
         };
         /**
          * List Children
-         * @description 所有小朋友
+         * @description 幼儿列表。
+         *
+         *     带登录态时只返回当前教师班级的幼儿，与「新增/删除幼儿只能作用于本班」保持一致；
+         *     无登录态时（demo 脚本、未开启登录的旧流程）返回全部，便于演示兼容。
          */
         get: operations["list_children_children_get"];
+        put?: never;
+        /**
+         * Create Child
+         * @description 新增幼儿；不能借 classroom_id 把数据写进其他班级。
+         */
+        post: operations["create_child_children_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/children/{child_id}/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Child Profile
+         * @description 返回当前教师班级内一名幼儿的事实型档案聚合。
+         */
+        get: operations["child_profile_children__child_id__profile_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -71,7 +270,11 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Child
+         * @description 只删除没有任何素材或观察记录的幼儿，不提供级联删除。
+         */
+        delete: operations["delete_child_children__child_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -230,7 +433,7 @@ export interface paths {
         };
         /**
          * List Observations
-         * @description 所有观察记录（简要），可按状态过滤。
+         * @description 所有观察记录（简要），可按状态 / 幼儿 / 区域 / 观察日期区间组合过滤。
          */
         get: operations["list_observations_observations_get"];
         put?: never;
@@ -265,6 +468,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/observations/{obs_id}/children": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace Observation Children
+         * @description 全量替换素材中的幼儿关联；第一个幼儿同步为记录主角。
+         */
+        put: operations["replace_observation_children_observations__obs_id__children_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/observations/{obs_id}": {
         parameters: {
             query?: never;
@@ -279,7 +502,14 @@ export interface paths {
         get: operations["get_observation_detail_observations__obs_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Observation
+         * @description 删除一条观察记录及其全部数据。
+         *
+         *     用于清理导入的测试记录：会一并删除该记录绑定的素材（含磁盘文件）、
+         *     观察指标、多人关联和 AI 调用审计。属于明确的"整条记录做删除"。
+         */
+        delete: operations["delete_observation_observations__obs_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -409,7 +639,7 @@ export interface paths {
         };
         /**
          * Export Observation
-         * @description 按园所固定 4 列 8 行模板导出一条已确认观察记录。
+         * @description 导出一条已确认观察记录；缺省保持 Word 行为。
          */
         get: operations["export_observation_observations__obs_id__export_get"];
         put?: never;
@@ -432,6 +662,23 @@ export interface paths {
          * @description 导出指定北京时间月份内的全部已确认观察记录。
          */
         get: operations["export_monthly_observations_exports_monthly_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/exports/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export History */
+        get: operations["export_history_exports_history_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -468,6 +715,81 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AuthAccountResponse */
+        AuthAccountResponse: {
+            /** Id */
+            id: number;
+            /** Phone */
+            phone: string;
+            /** Teacher Id */
+            teacher_id: number;
+            /** Name */
+            name: string;
+            /** Kindergarten Id */
+            kindergarten_id?: number | null;
+            /** Kindergarten Name */
+            kindergarten_name?: string | null;
+            /** Classroom Id */
+            classroom_id?: number | null;
+            /** Classroom Name */
+            classroom_name?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /** AuthCodeRequest */
+        AuthCodeRequest: {
+            /** Phone */
+            phone: string;
+        };
+        /** AuthDeleteRequest */
+        AuthDeleteRequest: {
+            /** Code */
+            code: string;
+        };
+        /** AuthLoginRequest */
+        AuthLoginRequest: {
+            /** Phone */
+            phone: string;
+            /** Code */
+            code: string;
+        };
+        /** AuthLoginResponse */
+        AuthLoginResponse: {
+            /** Access Token */
+            access_token: string;
+            /**
+             * Token Type
+             * @default bearer
+             * @constant
+             */
+            token_type: "bearer";
+            /** Expires In */
+            expires_in: number;
+            account: components["schemas"]["AuthAccountResponse"];
+        };
+        /** AuthPhoneRequest */
+        AuthPhoneRequest: {
+            /** New Phone */
+            new_phone: string;
+            /** Code */
+            code: string;
+        };
+        /** AuthRegisterRequest */
+        AuthRegisterRequest: {
+            /** Phone */
+            phone: string;
+            /** Code */
+            code: string;
+            /** Name */
+            name: string;
+            /** Kindergarten Name */
+            kindergarten_name: string;
+            /** Classroom Name */
+            classroom_name: string;
+        };
         /** Body_upload_media_uploads_post */
         Body_upload_media_uploads_post: {
             /**
@@ -475,6 +797,67 @@ export interface components {
              * Format: binary
              */
             file: string;
+        };
+        /**
+         * ChildCreate
+         * @description 在当前教师班级新增幼儿。
+         */
+        ChildCreate: {
+            /** Name */
+            name: string;
+            /** Classroom Id */
+            classroom_id?: number | null;
+            /** Birth Date */
+            birth_date?: string | null;
+            /** Gender */
+            gender?: ("male" | "female") | null;
+        };
+        /** ChildProfileRecordResponse */
+        ChildProfileRecordResponse: {
+            /** Observation Id */
+            observation_id: number;
+            /** Title */
+            title: string;
+            /** Area Name */
+            area_name?: string | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Dimensions */
+            dimensions: string[];
+            /** Exported */
+            exported: boolean;
+        };
+        /** ChildProfileResponse */
+        ChildProfileResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Classroom Id */
+            classroom_id?: number | null;
+            /** Classroom Name */
+            classroom_name?: string | null;
+            /** Birth Date */
+            birth_date?: string | null;
+            /** Gender */
+            gender?: ("male" | "female") | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Media Count */
+            media_count: number;
+            /** Record Count */
+            record_count: number;
+            /** Observed Day Count */
+            observed_day_count: number;
+            /** Dimension Counts */
+            dimension_counts: {
+                [key: string]: number;
+            };
+            /** Records */
+            records: components["schemas"]["ChildProfileRecordResponse"][];
         };
         /** ChildResponse */
         ChildResponse: {
@@ -501,10 +884,81 @@ export interface components {
             /** Gender */
             gender?: ("男" | "女") | null;
         };
+        /** ClassroomSummaryResponse */
+        ClassroomSummaryResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Child Count */
+            child_count: number;
+        };
+        /** ExportHistoryResponse */
+        ExportHistoryResponse: {
+            /** Id */
+            id: number;
+            /** Observation Id */
+            observation_id?: number | null;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "single" | "monthly";
+            /**
+             * Format
+             * @enum {string}
+             */
+            format: "docx" | "pdf" | "md";
+            /** File Name */
+            file_name: string;
+            /** Size */
+            size: number;
+            /** Child Name */
+            child_name?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Download Url */
+            download_url?: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** KindergartenResponse */
+        KindergartenResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Classrooms */
+            classrooms: components["schemas"]["ClassroomSummaryResponse"][];
+            /** Teachers */
+            teachers: components["schemas"]["KindergartenTeacherResponse"][];
+            /**
+             * My Role
+             * @enum {string}
+             */
+            my_role: "owner" | "teacher";
+        };
+        /** KindergartenTeacherResponse */
+        KindergartenTeacherResponse: {
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Phone */
+            phone?: string | null;
+            /** Classroom Id */
+            classroom_id?: number | null;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "owner" | "teacher";
         };
         /** MediaResponse */
         MediaResponse: {
@@ -527,6 +981,11 @@ export interface components {
             uploaded_at: string;
             /** Thumbnail Failure Reason */
             thumbnail_failure_reason?: string | null;
+        };
+        /** NameUpdate */
+        NameUpdate: {
+            /** Name */
+            name: string;
         };
         /** NarrativeGenerationResponse */
         NarrativeGenerationResponse: {
@@ -555,6 +1014,11 @@ export interface components {
             engine: string;
             /** Notice */
             notice: string;
+        };
+        /** ObservationChildrenUpdate */
+        ObservationChildrenUpdate: {
+            /** Child Ids */
+            child_ids: number[];
         };
         /**
          * ObservationCreate
@@ -837,6 +1301,235 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    send_auth_code_auth_code_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    login_auth_login_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthLoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_auth_register_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthLoginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    auth_me_auth_me_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthAccountResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    logout_auth_logout_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_phone_auth_phone_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthPhoneRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthAccountResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_account_auth_account_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthDeleteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_health_get: {
         parameters: {
             query?: never;
@@ -853,6 +1546,175 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_current_kindergarten_kindergartens_current_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KindergartenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_current_kindergarten_kindergartens_current_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NameUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KindergartenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_classroom_classrooms_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NameUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassroomSummaryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_classroom_classrooms__classroom_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                classroom_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_classroom_classrooms__classroom_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                classroom_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NameUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassroomSummaryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -880,7 +1742,9 @@ export interface operations {
     list_children_children_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -893,6 +1757,114 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChildResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_child_children_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChildCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    child_profile_children__child_id__profile_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                child_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChildProfileResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_child_children__child_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                child_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1142,6 +2114,14 @@ export interface operations {
             query?: {
                 /** @description 按处理状态过滤 */
                 status?: ("uploaded" | "processing" | "ready_for_review" | "confirmed" | "failed") | null;
+                /** @description 按幼儿过滤：该幼儿是主角或关联幼儿的记录都会返回 */
+                child_id?: number | null;
+                /** @description 按游戏区域过滤 */
+                area_id?: number | null;
+                /** @description 观察日期（北京时间）起始日，含当天，格式 YYYY-MM-DD */
+                date_from?: string | null;
+                /** @description 观察日期（北京时间）截止日，含当天，格式 YYYY-MM-DD */
+                date_to?: string | null;
             };
             header?: never;
             path?: never;
@@ -1172,7 +2152,9 @@ export interface operations {
     create_observation_observations_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1236,6 +2218,43 @@ export interface operations {
             };
         };
     };
+    replace_observation_children_observations__obs_id__children_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObservationChildrenUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_observation_detail_observations__obs_id__get: {
         parameters: {
             query?: never;
@@ -1255,6 +2274,37 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ObservationDetailResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_observation_observations__obs_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -1502,8 +2552,12 @@ export interface operations {
             query?: {
                 /** @description 是否在观察分析末尾附带已采纳指标 */
                 include_indicators?: boolean;
+                /** @description docx / pdf / md */
+                format?: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -1538,8 +2592,12 @@ export interface operations {
                 month: number;
                 /** @description 是否在观察分析末尾附带已采纳指标 */
                 include_indicators?: boolean;
+                /** @description docx / pdf / md */
+                format?: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1552,6 +2610,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_history_exports_history_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportHistoryResponse"][];
                 };
             };
             /** @description Validation Error */

@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { ArrowLeft } from "lucide-react";
-import { Link } from "react-router";
 
+import { BackButton } from "../components/back-button";
 import { MobilePage } from "../components/mobile-page";
 import {
   type Child,
@@ -18,13 +17,10 @@ export function SettingsPage() {
     <MobilePage>
       <main className="px-5 py-5">
         <header className="mb-7 flex items-center gap-3">
-          <Link
-            aria-label="返回今日素材"
+          <BackButton
             className="grid size-11 shrink-0 place-items-center rounded-full bg-surface text-ink shadow-sm"
-            to="/"
-          >
-            <ArrowLeft size={22} />
-          </Link>
+            label="返回上一页"
+          />
           <div>
             <h1 className="text-2xl font-bold">基础信息设置</h1>
             <p className="mt-1 text-sm text-ink-muted">仅用于补全演示所需资料</p>

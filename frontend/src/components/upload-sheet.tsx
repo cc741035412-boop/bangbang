@@ -5,6 +5,7 @@ import { Link } from "react-router";
 import { FEATURES } from "../config/features";
 import {
   CaptureError,
+  MAX_UPLOAD_SECONDS,
   MAX_UPLOAD_SIZE_BYTES,
   useAreas,
   useChildren,
@@ -15,6 +16,17 @@ const ACCEPTED_VIDEO = "video/mp4,video/quicktime,.mp4,.mov";
 const ACCEPTED_IMAGE = "image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif";
 const SUPPORTED_TYPES = new Set(["image/jpeg", "image/png", "image/heic", "image/heif", "video/mp4", "video/quicktime"]);
 const SUPPORTED_SUFFIXES = new Set([".jpg", ".jpeg", ".png", ".heic", ".heif", ".mp4", ".mov"]);
+
+function readVideoDuration(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(video.duration); };
+    video.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    video.src = url;
+  });
+}
 
 export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUploaded: (duration: number) => void }) {
   const enteredAt = useRef(0);
@@ -34,11 +46,18 @@ export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUp
     enteredAt.current = performance.now();
   }, []);
 
-  function chooseFile(event: ChangeEvent<HTMLInputElement>) {
+  async function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0] ?? null;
     event.target.value = "";
     setFile(selected);
-    setFileError(selected ? validateFile(selected) : "");
+    let err = selected ? validateFile(selected) : "";
+    if (!err && selected && isVideo(selected)) {
+      const duration = await readVideoDuration(selected);
+      if (duration != null && duration > MAX_UPLOAD_SECONDS) {
+        err = "视频太长了，建议录 1~3 分钟的片段。超过 3 分钟会影响生成效果，请缩短后再上传";
+      }
+    }
+    setFileError(err);
     setUploadPercentage(null);
     progress.current = {};
     submitCapture.reset();
@@ -96,6 +115,7 @@ export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUp
             <FileChoice accept={ACCEPTED_VIDEO} active={Boolean(file && isVideo(file))} icon={<FileVideo size={28} />} label="视频" onChange={chooseFile} />
             <FileChoice accept={ACCEPTED_IMAGE} active={Boolean(file && !isVideo(file))} icon={<ImageIcon size={28} />} label="照片" onChange={chooseFile} />
           </div>
+          <p className="mt-2 text-xs leading-6 text-ink-muted">视频建议录 1~3 分钟的短片段，观察更聚焦、效果更好。超过 3 分钟系统会提示缩短。</p>
           {file && (
             <div className="mt-3 flex min-h-12 items-center gap-3 rounded-xl bg-[#f7f6f2] px-3">
               <Paperclip aria-hidden className="shrink-0 text-brand" size={20} />
