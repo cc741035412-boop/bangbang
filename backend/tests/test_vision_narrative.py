@@ -61,6 +61,8 @@ class DoubaoVisionNarrativeTest(unittest.TestCase):
                 media_type="video",
                 duration_sec=300,
                 frames=[{"timestamp_sec": None, "data_uri": FAKE_IMAGE}],
+                purpose="观察搭建倒塌后如何调整",
+                subject_context="幼儿A是左侧红衣幼儿",
             )
 
         # 请求格式校验（火山方舟 Responses API）
@@ -71,6 +73,10 @@ class DoubaoVisionNarrativeTest(unittest.TestCase):
         self.assertEqual(content[0]["image_url"], FAKE_IMAGE)
         self.assertEqual(content[1]["type"], "input_text")
         self.assertIn("建构区", content[1]["text"])
+        self.assertIn("观察搭建倒塌后如何调整", content[1]["text"])
+        self.assertIn("幼儿A是左侧红衣幼儿", content[1]["text"])
+        self.assertIn("不能作为已发生行为或能力的证据", content[1]["text"])
+        self.assertIn("不得按出镜频率猜人", content[1]["text"])
         # 鉴权头用的是 ARK_API_KEY
         self.assertEqual(captured["headers"]["Authorization"], "Bearer ark-test")
         self.assertEqual(captured["url"], ai_service.DOUBAO_VISION_API_URL)
@@ -131,8 +137,9 @@ class DoubaoVisionNarrativeTest(unittest.TestCase):
         # 3 帧画面 + 1 段文字引导
         self.assertEqual([c["type"] for c in content], ["input_image", "input_image", "input_image", "input_text"])
         self.assertEqual([c["image_url"] for c in content[:3]], [f["data_uri"] for f in frames])
-        # 提示词应引导模型按时间顺序描述
-        self.assertIn("从开始到结束", content[3]["text"])
+        # 提示词应引导模型按时间顺序、连贯地描述（不是点状罗列）
+        self.assertIn("连贯的白描", content[3]["text"])
+        self.assertIn("起因", content[3]["text"])
 
     def test_falls_back_without_key_or_image(self):
         # 无 key：不调用模型直接降级

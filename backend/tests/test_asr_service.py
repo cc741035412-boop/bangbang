@@ -94,5 +94,50 @@ class AsrServiceTest(unittest.TestCase):
             self.assertTrue(audio and len(audio) > 100)
 
 
+class AsrTriggerRulesTest(unittest.TestCase):
+    @staticmethod
+    def _make_wav(amplitudes):
+        import struct
+        return b"data" + struct.pack("<I", len(amplitudes) * 2) + b"".join(
+            struct.pack("<h", a) for a in amplitudes
+        )
+
+    def _patched_doubao(self, wav):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(patch.object(config, "ASR_MODE", "doubao"))
+        stack.enter_context(patch.object(config, "ASR_API_KEY", "ark-test"))
+        stack.enter_context(patch.object(asr_service, "_extract_audio_bytes", lambda p: wav))
+        return stack
+
+    def test_short_video_skips_asr(self):
+        with patch.object(config, "ASR_MODE", "doubao"), patch.object(config, "ASR_API_KEY", "ark-test"):
+            out = asr_service.transcribe_video("/tmp/a.mp4", duration_sec=5)
+        self.assertTrue(out["is_mock"])
+        self.assertIsNone(out["asr_run"])
+        self.assertIn("不足", out["notice"])
+
+    def test_silent_audio_skips_asr(self):
+        silent = self._make_wav([0] * 64)
+        with self._patched_doubao(silent) as stack:
+            out = asr_service.transcribe_video("/tmp/a.mp4", duration_sec=20)
+        self.assertTrue(out["is_mock"])
+        self.assertIn("无声", out["notice"])
+
+    def test_loud_audio_proceeds_and_returns_transcript(self):
+        loud = self._make_wav([4000] * 64)
+        with self._patched_doubao(loud) as stack:
+            with patch.object(asr_service.httpx, "post", return_value=FakeResponse(_fake_payload("孩子们在搭桥"))):
+                out = asr_service.transcribe_video("/tmp/a.mp4", duration_sec=20)
+        self.assertFalse(out["is_mock"])
+        self.assertEqual(out["transcript"], "孩子们在搭桥")
+
+    def test_audio_is_silent_detection(self):
+        self.assertTrue(asr_service._audio_is_silent(self._make_wav([0] * 32)))
+        self.assertFalse(asr_service._audio_is_silent(self._make_wav([0] * 31 + [5000])))
+        # 无法识别 WAV 时保守返回 False（当作有声音，不跳过）
+        self.assertFalse(asr_service._audio_is_silent(b"RIFF not a real wav"))
+
+
 if __name__ == "__main__":
     unittest.main()

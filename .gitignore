@@ -33,3 +33,22 @@ backend/work/
 
 # Generated exports may contain child information; keep them local only
 outputs/*.docx
+
+# Locally reviewed artifacts; publish only an explicitly approved selection
+outputs/*.pdf
+outputs/*.zip
+outputs/*.png
+outputs/*.jpg
+outputs/*.jpeg
+outputs/portfolio-preview.html
+
+# Runtime logs and backups
+*.log
+*.bak
+*.sqlite3-*
+
+# Superseded local handoff notes and generated storyboard exports
+/docs/交接给-codex.md
+/docs/未接入功能-接口契约.md
+/Codex 图像*.png
+/outputs/onepage-image-edit-notes-*.md

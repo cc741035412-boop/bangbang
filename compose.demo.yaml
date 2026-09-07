@@ -1,0 +1,25 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      BANGBANG_DB_PATH: /data/bangbang.db
+      BANGBANG_UPLOAD_DIR: /data/uploads
+      BANGBANG_ENV: development
+      BANGBANG_ALLOWED_HOSTS: localhost,127.0.0.1
+      BANGBANG_AI_MODE: mock
+      BANGBANG_VISION_MODE: mock
+      BANGBANG_ASR_MODE: mock
+      SMS_PROVIDER: mock
+      SMS_MOCK_CODE: "123456"
+    volumes:
+      - bangbang-data:/data
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  bangbang-data:

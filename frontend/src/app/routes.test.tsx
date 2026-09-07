@@ -26,7 +26,7 @@ describe("AppRoutes", () => {
   it.each([
     ["/", "今日素材"],
     ["/capture", "今日素材"],
-    ["/month", "本月素材"],
+    ["/month", "月素材"],
     ["/mine", "我的"],
     ["/observations/12/review", "正在打开这条记录…"],
     ["/observations/12", "正在打开观察记录…"],

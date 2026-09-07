@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 
 import { MinePage } from "./mine-page";
@@ -72,12 +72,22 @@ describe("home pages", () => {
     expect(screen.getByRole("link", { name: "今日素材" })).toHaveAttribute("aria-current", "page");
   });
 
-  it("groups all current-month materials by kindergarten date", () => {
+  it("groups all current-month materials into 旬 segments, 由近及远", () => {
     render(<MemoryRouter><MonthMediaPage /></MemoryRouter>);
+    // 8/27、8/26 都在下旬（21~31日），显示为一个 segment 标题
+    expect(screen.getByRole("heading", { name: "21~31日 · 2 条" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开建构区记录" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开角色区记录" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "8月27日 · 今天" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "8月26日" })).toBeInTheDocument();
+    // 右上角有月份选择交互键
+    expect(screen.getByRole("button", { name: "选择月份" })).toBeInTheDocument();
+  });
+
+  it("can switch month via the picker", () => {
+    render(<MemoryRouter><MonthMediaPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "选择月份" }));
+    fireEvent.click(screen.getByRole("button", { name: "9月" }));
+    // mock 数据只有 8 月，切到 9 月应显示空态
+    expect(screen.getByText("9月还没有素材")).toBeInTheDocument();
   });
 
   it("derives child and monthly record counts from confirmed observations", () => {

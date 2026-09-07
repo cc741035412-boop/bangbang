@@ -133,6 +133,8 @@ def _doubao_vision_or_fallback(
     frames: Optional[List[Dict]],
     transcript: Optional[str] = None,
     child_count_hint: Optional[int] = None,
+    purpose: str = "",
+    subject_context: str = "",
 ) -> Dict:
     """用豆包视觉生成客观白描（图片或多帧视频画面）；失败时永远降级到 mock。
 
@@ -150,6 +152,8 @@ def _doubao_vision_or_fallback(
         frames=frames or [],
         transcript=transcript,
         child_count_hint=child_count_hint,
+        purpose=purpose,
+        subject_context=subject_context,
     )
     content: List[Dict] = []
     if frames:
@@ -241,6 +245,8 @@ def generate_narrative(
     frames: Optional[List[Dict]] = None,
     transcript: Optional[str] = None,
     child_count_hint: Optional[int] = None,
+    purpose: str = "",
+    subject_context: str = "",
 ) -> Dict:
     """
     根据素材生成客观白描。
@@ -267,6 +273,8 @@ def generate_narrative(
             frames=frames,
             transcript=transcript,
             child_count_hint=child_count_hint,
+            purpose=purpose,
+            subject_context=subject_context,
         )
     return _mock_narrative(area_code, media_type, duration_sec)
 
@@ -676,6 +684,8 @@ def _deepseek_or_fallback(
     age_group: str,
     duration_sec: Optional[int],
     top_n: int,
+    purpose: str = "",
+    subject_context: str = "",
 ) -> Dict:
     started_at = utc_now()
     started_clock = perf_counter()
@@ -685,6 +695,8 @@ def _deepseek_or_fallback(
     prior = {code: weight for code, weight in prior.items() if code in allowed_codes}
     user_prompt = render_user_prompt(
         narrative=narrative,
+        purpose=purpose,
+        subject_context=subject_context,
         area_name=area_name,
         age_group=age_group,
         indicators=catalog,
@@ -735,7 +747,7 @@ def _deepseek_or_fallback(
                     narrative=narrative,
                     top_n=top_n,
                 )
-                if not suggestions:
+                if not suggestions and parsed.get("suggestions") != []:
                     raise ValueError("模型结果校验后一条候选都不剩")
 
                 baseline = _suggest_indicators_mock(
@@ -813,12 +825,16 @@ def suggest_indicators(
     top_n: int = 3,
     area_name: Optional[str] = None,
     child_names: Optional[List[str]] = None,
+    purpose: str = "",
+    subject_context: str = "",
 ) -> Dict:
     """按配置执行工作流 B；DeepSeek 失败时永远降级而不向上抛错。"""
     sanitized_narrative = _anonymize_narrative(narrative, child_names or [])
     if AI_MODE == "deepseek":
         return _deepseek_or_fallback(
             narrative=sanitized_narrative,
+            purpose=_anonymize_narrative(purpose, child_names or []),
+            subject_context=_anonymize_narrative(subject_context, child_names or []),
             area_code=area_code,
             area_name=area_name or area_code,
             age_group=age_group,
@@ -841,3 +857,149 @@ def suggest_indicators(
         round((perf_counter() - started_clock) * 1000),
     )
     return result
+
+
+# ============================================================
+# 工作流 C：白描 + 已确认指标 → 观察分析 / 下一步支持策略 的思路支架
+# ============================================================
+
+ANALYSIS_PROMPT_VERSION = "wf-analysis-v1"
+
+
+def _analysis_mock(narrative, area_name, indicator_names):
+    """规则版思路支架：不做评价，只把白描 + 指标串成教师可改写的起点。"""
+    area = area_name or "区域"
+    ind = "、".join(indicator_names) if indicator_names else "观察指标"
+    summary = (narrative or "").strip()
+    if len(summary) > 90:
+        summary = summary[:90].rstrip() + "…"
+    analysis = (
+        f"幼儿在{area}活动中：{summary or '（白描尚未生成）'}。"
+        f"结合已确认指标（{ind}），可把观察重点放在行为的过程与结果上继续跟进；"
+        "这一段仅作思路支架，请结合实际情况改写成你的专业观察分析。"
+    )
+    strategy = (
+        f"可继续提供与{area}相关的游戏材料，观察幼儿在{ind}上的连贯表现，"
+        "并根据幼儿当时的反应调整支持方式；这一段仅作思路支架，请改写为你的下一步支持策略。"
+    )
+    return analysis, strategy
+
+
+def _analysis_via_deepseek(narrative, area_name, indicator_names):
+    user_prompt = (
+        f"幼儿园观察记录，游戏区域：{area_name or '未填写'}。\n"
+        f"已确认幼儿行为指标：{ ('、'.join(indicator_names)) or '无' }。\n"
+        f"客观白描：\n{narrative}\n\n"
+        "请给教师写两段可改写的**思路支架**（不要写成定论、不要臆断意图）：\n"
+        "1. 观察分析：把幼儿行为与上述指标联系起来，简述过程与结果。\n"
+        "2. 下一步支持策略：给 1~2 条可落地的支持建议。\n"
+        '只输出 JSON：{"analysis": "...", "strategy": "..."}'
+    )
+    body = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是幼儿园教师观察记录助手，负责给出可改写的分析与支持策略支架，不评价幼儿。"},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": DEEPSEEK_TEMPERATURE,
+        "stream": False,
+    }
+    for attempt in range(1, DEEPSEEK_MAX_ATTEMPTS + 1):
+        try:
+            resp = httpx.post(
+                DEEPSEEK_API_URL,
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=DEEPSEEK_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            content = (resp.json().get("choices") or [{}])[0].get("message") or {}
+            text = (content.get("content") or "").strip()
+            if not text:
+                raise ValueError("DeepSeek 返回空内容")
+            parsed = json.loads(text)
+            analysis = (parsed.get("analysis") or "").strip()
+            strategy = (parsed.get("strategy") or "").strip()
+            if not analysis or not strategy:
+                raise ValueError("DeepSeek 返回缺少 analysis/strategy")
+            return {
+                "analysis": analysis,
+                "strategy": strategy,
+                "is_mock": False,
+                "engine": DEEPSEEK_MODEL,
+                "notice": "AI 建议仅供参考，请改写成你的判断。",
+                "ai_run": {
+                    "workflow": "analysis_suggestion",
+                    "provider": "deepseek",
+                    "model": DEEPSEEK_MODEL,
+                    "prompt_version": ANALYSIS_PROMPT_VERSION,
+                    "status": "completed",
+                    "started_at": utc_now(),
+                    "completed_at": utc_now(),
+                    "latency_ms": None,
+                    "response_raw": parsed,
+                    "error_reason": None,
+                    "is_mock": False,
+                    "prompt_rendered": user_prompt,
+                    "token_usage": (resp.json().get("usage") or {}),
+                    "temperature": DEEPSEEK_TEMPERATURE,
+                },
+            }
+        except (httpx.HTTPError, ValueError, json.JSONDecodeError, KeyError, IndexError, TypeError):
+            if attempt == DEEPSEEK_MAX_ATTEMPTS:
+                raise
+    raise RuntimeError("DeepSeek 分析支架生成失败")  # 应不可达
+
+
+def suggest_analysis_and_strategy(
+    narrative: str,
+    area_name: Optional[str],
+    indicator_names: List[str],
+    child_count_hint: int = 1,
+) -> Dict:
+    """根据白描 + 已确认指标，给出「观察分析 + 下一步支持策略」的 AI 思路支架。
+
+    返回：{"analysis": str, "strategy": str, "is_mock": bool, "engine": str,
+           "notice": str, "ai_run": dict}
+    教师可据此改写，不直接作为定稿。真实分析走 DeepSeek，失败降级为规则支架。
+    """
+    started_at = utc_now()
+    started_clock = perf_counter()
+    if AI_MODE == "deepseek" and DEEPSEEK_API_KEY:
+        try:
+            result = _analysis_via_deepseek(narrative, area_name, indicator_names)
+            run = result.pop("ai_run")
+            run["started_at"] = started_at
+            run["latency_ms"] = round((perf_counter() - started_clock) * 1000)
+            result["ai_run"] = run
+            return result
+        except Exception:
+            pass  # 降级到规则支架
+
+    analysis, strategy = _analysis_mock(narrative, area_name, indicator_names)
+    return {
+        "analysis": analysis,
+        "strategy": strategy,
+        "is_mock": True,
+        "engine": "demo-mock-analysis-v1",
+        "notice": "⚠️ 当前为演示/降级思路支架，仅作参考，请改写成你的判断。",
+        "ai_run": {
+            "workflow": "analysis_suggestion",
+            "provider": "mock",
+            "model": "demo-mock-analysis-v1",
+            "prompt_version": ANALYSIS_PROMPT_VERSION,
+            "status": "completed",
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "latency_ms": round((perf_counter() - started_clock) * 1000),
+            "response_raw": None,
+            "error_reason": None,
+            "is_mock": True,
+            "prompt_rendered": "mock 模式未向外部模型发送 prompt",
+            "token_usage": None,
+            "temperature": None,
+        },
+    }

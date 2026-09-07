@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { CandidateIndicators } from "./candidate-indicators";
@@ -76,7 +76,7 @@ describe("CandidateIndicators", () => {
     expect(screen.getByText("高阶")).toBeInTheDocument();
   });
 
-  it("shows three-level confidence and preserves accept or reject decisions", () => {
+  it("shows evidence and preserves accept or reject decisions", async () => {
     const onDecide = vi.fn();
     render(
       <CandidateIndicators
@@ -88,13 +88,31 @@ describe("CandidateIndicators", () => {
       />,
     );
 
-    expect(screen.getByText("较有把握")).toBeInTheDocument();
+    expect(screen.getByText(/较有把握/)).toBeInTheDocument();
     expect(screen.getByText(/反复调整后继续搭建/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "采纳 试误与问题解决" }));
-    fireEvent.click(screen.getByRole("button", { name: "不采纳" }));
+    fireEvent.click(screen.getByRole("button", { name: "采用 试误与问题解决" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "不采用 试误与问题解决" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "不采用 试误与问题解决" }));
 
     expect(onDecide).toHaveBeenNthCalledWith(1, 10, true);
     expect(onDecide).toHaveBeenNthCalledWith(2, 10, false);
+    await waitFor(() => expect(screen.getByRole("button", { name: "采用 试误与问题解决" })).toBeEnabled());
   });
+  it("选择立即反馈，保存失败恢复原状并能重试", async () => {
+    let rejectSave: (error: Error) => void = () => {};
+    const pending = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+    const onDecide = vi.fn().mockReturnValue(pending);
+    render(<CandidateIndicators addingTeacherTag={false} indicatorOptions={indicatorOptions} onAddTeacherTag={vi.fn()} onDecide={onDecide} tags={[aiTag]} />);
+    const adopt = screen.getByRole("button", { name: "采用 试误与问题解决" });
+    fireEvent.click(adopt);
+    expect(adopt).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("保存中");
+    expect(adopt).toBeDisabled();
+    await act(async () => { rejectSave(new Error("network")); });
+    expect(screen.getByRole("alert")).toHaveTextContent("没有保存成功");
+    expect(adopt).toHaveAttribute("aria-pressed", "false");
+    expect(adopt).toBeEnabled();
+  });
+
 });

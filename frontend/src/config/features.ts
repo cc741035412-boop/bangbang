@@ -12,10 +12,10 @@ export const FEATURES = {
   auth: true,
   /** 园所与班级管理 */
   kindergarten: true,
-  /** 导出格式：docx 已通 */
+  /** 导出格式：docx / pdf 已通（Markdown 已停用，改为带图片的报告/表格形式） */
   exportDocx: true,
   exportPdf: true,
-  exportMarkdown: true,
+  exportMarkdown: false,
   /** 导出历史（需要后端建表记录每次导出） */
   exportHistory: true,
   /** 幼儿档案详情页（聚合统计 + 该幼儿的记录列表） */

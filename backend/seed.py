@@ -1,5 +1,5 @@
 from sqlmodel import Session, select
-from models import engine, Area, ClassRoom, Child, Teacher
+from models import engine, init_db, Area, ClassRoom, Child, Teacher
 from config import DEFAULT_TEACHER_NAME
 
 # 8 个游戏区域
@@ -19,6 +19,8 @@ CHILDREN = ["王小满", "李念安", "周允之", "赵知夏", "孙朗月"]
 
 
 def seed():
+    # 新环境先按当前模型建表；旧环境仍必须通过对应幂等迁移升级结构。
+    init_db()
     with Session(engine) as session:
 
         # 防呆：已经塞过就不再塞，避免重复

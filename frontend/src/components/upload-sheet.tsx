@@ -1,16 +1,14 @@
 import { FileVideo, Image as ImageIcon, LoaderCircle, Paperclip, X } from "lucide-react";
 import { type ChangeEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { Link } from "react-router";
 
-import { FEATURES } from "../config/features";
 import {
   CaptureError,
   MAX_UPLOAD_SECONDS,
   MAX_UPLOAD_SIZE_BYTES,
   useAreas,
-  useChildren,
   useSubmitCapture,
 } from "../features/observations/api";
+import { areaAccent } from "../lib/area-colors";
 
 const ACCEPTED_VIDEO = "video/mp4,video/quicktime,.mp4,.mov";
 const ACCEPTED_IMAGE = "image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif";
@@ -28,18 +26,14 @@ function readVideoDuration(file: File): Promise<number | null> {
   });
 }
 
-export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUploaded: (duration: number) => void }) {
+export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUploaded: (observationId: number, duration: number) => void }) {
   const enteredAt = useRef(0);
   const progress = useRef<{ mediaId?: number; observationId?: number }>({});
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState("");
   const [areaId, setAreaId] = useState<number | null>(null);
-  const [childId, setChildId] = useState<number | null>(null);
-  // 多人游戏时额外勾选的幼儿；单选模式下始终为空
-  const [extraChildIds, setExtraChildIds] = useState<number[]>([]);
   const [uploadPercentage, setUploadPercentage] = useState<number | null>(null);
   const areas = useAreas();
-  const children = useChildren();
   const submitCapture = useSubmitCapture();
 
   useEffect(() => {
@@ -63,50 +57,26 @@ export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUp
     submitCapture.reset();
   }
 
-  /**
-   * 单选模式：直接换主幼儿。
-   * 多选模式：第一个选中的当主角；取消主角时，把下一个已选的顶上来，
-   * 保证「主角」这个位置永远有人，后端的 child_id 不会变成 null。
-   */
-  function toggleChild(id: number) {
-    if (!FEATURES.multiChildCapture) {
-      setChildId(id);
-      return;
-    }
-    if (childId === id) {
-      const [next, ...rest] = extraChildIds;
-      setChildId(next ?? null);
-      setExtraChildIds(rest);
-      return;
-    }
-    if (extraChildIds.includes(id)) {
-      setExtraChildIds(extraChildIds.filter((item) => item !== id));
-      return;
-    }
-    if (childId == null) setChildId(id);
-    else setExtraChildIds([...extraChildIds, id]);
-  }
-
   function submit() {
-    if (!file || fileError || areaId == null || childId == null || submitCapture.isPending) return;
+    if (!file || fileError || areaId == null || submitCapture.isPending) return;
     setUploadPercentage(0);
     submitCapture.mutate(
-      { file, areaId, childId, extraChildIds, progress: progress.current, onUploadProgress: setUploadPercentage },
-      { onSuccess: () => onUploaded((performance.now() - enteredAt.current) / 1000) },
+      { file, areaId, progress: progress.current, onUploadProgress: setUploadPercentage },
+      { onSuccess: (result) => onUploaded(result.observationId, (performance.now() - enteredAt.current) / 1000) },
     );
   }
 
   const submitError = submitCapture.error instanceof CaptureError
     ? submitCapture.error.message
     : submitCapture.isError ? "上传失败，请重试" : "";
-  const canSubmit = Boolean(file && !fileError && areaId != null && childId != null && !submitCapture.isPending);
+  const canSubmit = Boolean(file && !fileError && areaId != null && !submitCapture.isPending);
 
   return (
     <div aria-label="上传素材" aria-modal="true" className="fixed inset-0 z-50 flex items-end justify-center bg-black/35" role="dialog">
       <button aria-label="关闭上传素材" className="absolute inset-0" disabled={submitCapture.isPending} onClick={onClose} type="button" />
       <section className="safe-bottom relative z-10 max-h-[92dvh] w-full max-w-[430px] overflow-y-auto rounded-t-[28px] bg-white px-5 pb-2 pt-6">
         <div className="flex items-start justify-between">
-          <div><h2 className="text-2xl font-bold">上传素材</h2><p className="mt-2 text-sm leading-6 text-ink-muted">拍完就传，别攒到晚上。观察目的可在整理时补充。</p></div>
+          <div><h2 className="text-2xl font-bold">上传素材</h2><p className="mt-2 text-sm leading-6 text-ink-muted">选择手机里拍好的素材，接下来选择幼儿和观察目标。</p></div>
           <button aria-label="关闭" className="grid size-9 place-items-center text-ink-muted" disabled={submitCapture.isPending} onClick={onClose} type="button"><X size={21} /></button>
         </div>
 
@@ -127,49 +97,35 @@ export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUp
         </StepCard>
 
         <StepCard number="2" title="游戏区域">
-          <select aria-label="游戏区域" className="min-h-12 w-full rounded-xl border border-[#ddd9d0] bg-white px-3" disabled={areas.isLoading || submitCapture.isPending} onChange={(event) => setAreaId(event.target.value ? Number(event.target.value) : null)} value={areaId ?? ""}>
-            <option value="">请选择游戏区域</option>
-            {(areas.data ?? []).map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}
-          </select>
-          {areas.isError && <p className="mt-2 text-sm text-red-700">区域加载失败，请刷新后重试</p>}
-        </StepCard>
-
-        <StepCard number="3" title={FEATURES.multiChildCapture ? "这条素材里有哪些孩子" : "这是哪个孩子"}>
-          <div
-            aria-label="选择幼儿"
-            className="flex flex-wrap gap-2"
-            role={FEATURES.multiChildCapture ? "group" : "radiogroup"}
-          >
-            {(children.data ?? []).map((child) => {
-              const isPrimary = childId === child.id;
-              const isExtra = extraChildIds.includes(child.id);
-              const selected = isPrimary || isExtra;
-              return (
-                <button
-                  aria-checked={FEATURES.multiChildCapture ? undefined : isPrimary}
-                  aria-pressed={FEATURES.multiChildCapture ? selected : undefined}
-                  className={`min-h-11 rounded-full border px-5 ${selected ? "border-brand bg-[#eaf4ef] text-brand" : "border-[#ddd9d0] text-ink-muted"}`}
-                  disabled={submitCapture.isPending}
-                  key={child.id}
-                  onClick={() => toggleChild(child.id)}
-                  role={FEATURES.multiChildCapture ? undefined : "radio"}
-                  type="button"
-                >
-                  {child.name}
-                  {FEATURES.multiChildCapture && isPrimary && (
-                    <span className="ml-1 text-xs">· 主角</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-          {FEATURES.multiChildCapture && (
-            <p className="mt-3 text-xs leading-6 text-ink-muted">
-              可以选多个。第一个选中的是这条记录的主角，落款和文件名用他/她的名字。
-            </p>
+          {areas.isLoading ? (
+            <p className="text-sm text-ink-muted">正在加载游戏区域…</p>
+          ) : areas.isError ? (
+            <p className="text-sm text-red-700">区域加载失败，请刷新后重试</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="游戏区域">
+              {(areas.data ?? []).map((area) => {
+                const accent = areaAccent(area.name);
+                const Icon = accent.icon;
+                const selected = areaId === area.id;
+                return (
+                  <button
+                    aria-checked={selected}
+                    aria-label={area.name}
+                    className={`flex min-h-12 items-center gap-2 rounded-xl border px-3 text-sm font-bold ${selected ? "border-transparent" : "border-[#ddd9d0] bg-white text-stone-600"}`}
+                    disabled={submitCapture.isPending}
+                    key={area.id}
+                    onClick={() => setAreaId(selected ? null : area.id)}
+                    role="radio"
+                    style={selected ? { backgroundColor: accent.chipBg, color: accent.chipText, boxShadow: `inset 0 0 0 2px ${accent.dot}` } : undefined}
+                    type="button"
+                  >
+                    <Icon aria-hidden size={18} strokeWidth={2} style={{ color: accent.dot }} />
+                    {area.name}
+                  </button>
+                );
+              })}
+            </div>
           )}
-          {children.isError && <p className="text-sm text-red-700">幼儿信息加载失败，请刷新后重试</p>}
-          <Link className="mt-3 inline-flex min-h-10 items-center text-sm font-medium text-brand" onClick={onClose} to={FEATURES.childMutation ? "/children" : "/settings"}>管理幼儿信息</Link>
         </StepCard>
 
         {submitCapture.isPending && uploadPercentage != null && (
@@ -182,7 +138,7 @@ export function UploadSheet({ onClose, onUploaded }: { onClose: () => void; onUp
 
         <div className="mt-5 grid grid-cols-[1fr_2fr] gap-3">
           <button className="min-h-14 rounded-2xl bg-[#f0efeb] font-bold text-ink-muted" disabled={submitCapture.isPending} onClick={onClose} type="button">取消</button>
-          <button className="flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-brand font-bold text-white disabled:bg-stone-300 disabled:text-stone-500" disabled={!canSubmit} onClick={submit} type="button">{submitCapture.isPending && <LoaderCircle className="animate-spin" size={19} />}{submitCapture.isPending ? "正在上传…" : "确认"}</button>
+          <button className="flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-brand font-bold text-white disabled:bg-stone-300 disabled:text-stone-500" disabled={!canSubmit} onClick={submit} type="button">{submitCapture.isPending && <LoaderCircle className="animate-spin" size={19} />}{submitCapture.isPending ? "正在上传…" : "上传并继续"}</button>
         </div>
       </section>
     </div>
@@ -198,7 +154,7 @@ function FileChoice({ accept, active, icon, label, onChange }: { accept: string;
 }
 
 function validateFile(file: File) {
-  const type = file.type.split(";", 1)[0].trim().toLowerCase();
+  const type = (file.type.split(";", 1)[0] ?? "").trim().toLowerCase();
   const suffix = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
   if (!SUPPORTED_TYPES.has(type) && !(type === "" || type === "application/octet-stream") && !SUPPORTED_SUFFIXES.has(suffix)) return "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）";
   if (!SUPPORTED_TYPES.has(type) && !SUPPORTED_SUFFIXES.has(suffix)) return "只支持照片和视频（JPG、PNG、HEIC、MP4、MOV）";

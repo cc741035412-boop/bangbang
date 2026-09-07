@@ -33,7 +33,7 @@ def build_pre_migration_db(path: Path):
     cur.execute(
         "CREATE TABLE teacher (id INTEGER PRIMARY KEY, name VARCHAR, classroom_id INTEGER)"
     )
-    cur.execute("INSERT INTO teacher (id, name, classroom_id) VALUES (1, '蔡老师', 1)")
+    cur.execute("INSERT INTO teacher (id, name, classroom_id) VALUES (1, '模拟教师', 1)")
     cur.execute(
         "CREATE TABLE accounts (id INTEGER PRIMARY KEY, phone VARCHAR, "
         "teacher_id INTEGER, kindergarten_id INTEGER, role VARCHAR, created_at VARCHAR, "

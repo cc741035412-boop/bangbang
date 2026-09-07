@@ -222,10 +222,7 @@ export interface paths {
         };
         /**
          * List Children
-         * @description 幼儿列表。
-         *
-         *     带登录态时只返回当前教师班级的幼儿，与「新增/删除幼儿只能作用于本班」保持一致；
-         *     无登录态时（demo 脚本、未开启登录的旧流程）返回全部，便于演示兼容。
+         * @description 只返回当前教师班级的幼儿。
          */
         get: operations["list_children_children_get"];
         put?: never;
@@ -293,7 +290,7 @@ export interface paths {
         };
         /**
          * List Teachers
-         * @description 所有教师；供极简设置页读取。
+         * @description 只返回当前登录教师；园所成员列表使用园所专用接口。
          */
         get: operations["list_teachers_teachers_get"];
         put?: never;
@@ -355,7 +352,7 @@ export interface paths {
         put?: never;
         /**
          * Upload Media
-         * @description 上传一份模拟照片或视频，同时在 media 表登记一条
+         * @description 上传素材并直接绑定到当前教师拥有的待上传记录。
          */
         post: operations["upload_media_uploads_post"];
         delete?: never;
@@ -373,7 +370,7 @@ export interface paths {
         };
         /**
          * List Media
-         * @description 所有已上传的素材
+         * @description 当前教师观察记录绑定的全部素材。
          */
         get: operations["list_media_media_get"];
         put?: never;
@@ -433,7 +430,7 @@ export interface paths {
         };
         /**
          * List Observations
-         * @description 所有观察记录（简要），可按状态 / 幼儿 / 区域 / 观察日期区间组合过滤。
+         * @description 当前教师的观察记录，可组合筛选并按观察时间倒序分页。
          */
         get: operations["list_observations_observations_get"];
         put?: never;
@@ -459,7 +456,7 @@ export interface paths {
         put?: never;
         /**
          * Attach Media
-         * @description 把已上传的素材绑定到这条观察记录上
+         * @description 兼容旧客户端：只允许确认素材已绑定到同一条自有记录。
          */
         post: operations["attach_media_observations__obs_id__attach_media_post"];
         delete?: never;
@@ -530,7 +527,7 @@ export interface paths {
         put?: never;
         /**
          * Confirm Observation
-         * @description 教师定稿。要求幼儿、白描和至少一个已采纳的指标都到位。
+         * @description 教师定稿。要求幼儿、观察目标、白描和至少一个已采纳的指标都到位。
          */
         post: operations["confirm_observation_observations__obs_id__confirm_post"];
         delete?: never;
@@ -560,6 +557,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/observations/{obs_id}/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Observation People */
+        post: operations["observation_people_observations__obs_id__people_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/observations/{obs_id}/people/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Assign Observation People */
+        post: operations["assign_observation_people_observations__obs_id__people_assign_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/observations/{obs_id}/suggest-tags": {
         parameters: {
             query?: never;
@@ -578,6 +609,29 @@ export interface paths {
          *     - suggestions → source=ai_suggested、accepted=None（等待教师决定）
          */
         post: operations["suggest_tags_observations__obs_id__suggest_tags_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/observations/{obs_id}/suggest-analysis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Suggest Analysis
+         * @description 【AI 工作流 C】根据白描 + 已确认指标，给出「观察分析 + 下一步支持策略」的思路支架。
+         *
+         *     返回的 analysis / strategy 是**可改写的建议**，教师据此自行定稿；与教师的正式分析/措施分开返回与展示。
+         *     真实走 DeepSeek，失败降级为规则支架（is_mock=True）。
+         */
+        post: operations["suggest_analysis_observations__obs_id__suggest_analysis_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -715,6 +769,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AnalysisSuggestionResponse */
+        AnalysisSuggestionResponse: {
+            /** Observation Id */
+            observation_id: number;
+            /** Analysis */
+            analysis: string;
+            /** Strategy */
+            strategy: string;
+            /** Is Mock */
+            is_mock: boolean;
+            /** Engine */
+            engine: string;
+            /** Notice */
+            notice: string;
+        };
         /** AuthAccountResponse */
         AuthAccountResponse: {
             /** Id */
@@ -908,7 +977,7 @@ export interface components {
              * Format
              * @enum {string}
              */
-            format: "docx" | "pdf" | "md";
+            format: "docx" | "pdf";
             /** File Name */
             file_name: string;
             /** Size */
@@ -1090,6 +1159,23 @@ export interface components {
             confirmed_at?: string | null;
             /** Failure Reason */
             failure_reason?: string | null;
+            /** Observation Mode */
+            observation_mode?: ("focused" | "explore") | null;
+            /**
+             * Narrative Context Changed
+             * @default false
+             */
+            narrative_context_changed: boolean;
+            /**
+             * Suggestions Stale
+             * @default false
+             */
+            suggestions_stale: boolean;
+            /**
+             * Suggestions Ready
+             * @default false
+             */
+            suggestions_ready: boolean;
             /** Child Name */
             child_name?: string | null;
             /** Classroom Name */
@@ -1221,6 +1307,20 @@ export interface components {
             location?: string | null;
             /** Background Note */
             background_note?: string | null;
+        };
+        /** PeopleAssignment */
+        PeopleAssignment: {
+            /** Narrative */
+            narrative: string;
+            /** Assignments */
+            assignments: components["schemas"]["PersonAssignment"][];
+        };
+        /** PersonAssignment */
+        PersonAssignment: {
+            /** Ref Indexes */
+            ref_indexes: number[];
+            /** Child Id */
+            child_id: number;
         };
         /** RelatedChildResponse */
         RelatedChildResponse: {
@@ -1872,7 +1972,9 @@ export interface operations {
     update_child_children__child_id__patch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 child_id: number;
             };
@@ -1907,7 +2009,9 @@ export interface operations {
     list_teachers_teachers_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1922,12 +2026,23 @@ export interface operations {
                     "application/json": components["schemas"]["TeacherResponse"][];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     update_teacher_teachers__teacher_id__patch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 teacher_id: number;
             };
@@ -1981,11 +2096,15 @@ export interface operations {
     };
     upload_media_uploads_post: {
         parameters: {
-            query?: {
+            query: {
+                /** @description 当前账号拥有的待上传观察记录 id */
+                observation_id: number;
                 /** @description 视频时长（秒）。指标 1.1 的层级分界靠它纯计算得出，零幻觉。照片可不填。 */
                 duration_sec?: number | null;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2018,7 +2137,9 @@ export interface operations {
     list_media_media_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2033,12 +2154,23 @@ export interface operations {
                     "application/json": components["schemas"]["MediaResponse"][];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     get_media_file_media__media_id__file_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 media_id: number;
             };
@@ -2074,7 +2206,9 @@ export interface operations {
     get_media_thumbnail_media__media_id__thumbnail_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 media_id: number;
             };
@@ -2122,8 +2256,16 @@ export interface operations {
                 date_from?: string | null;
                 /** @description 观察日期（北京时间）截止日，含当天，格式 YYYY-MM-DD */
                 date_to?: string | null;
+                /** @description 按已采纳指标编码过滤，如 1.3 */
+                indicator_code?: string | null;
+                /** @description 每页数量 */
+                limit?: number;
+                /** @description 跳过数量 */
+                offset?: number;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2190,7 +2332,9 @@ export interface operations {
                 /** @description 要绑定的素材 id */
                 media_id: number;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2258,7 +2402,9 @@ export interface operations {
     get_observation_detail_observations__obs_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2320,7 +2466,9 @@ export interface operations {
     update_observation_observations__obs_id__patch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2355,7 +2503,9 @@ export interface operations {
     confirm_observation_observations__obs_id__confirm_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2385,8 +2535,12 @@ export interface operations {
     };
     generate_narrative_observations__obs_id__narrative_post: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                mode?: "focused" | "explore";
+            };
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2414,10 +2568,12 @@ export interface operations {
             };
         };
     };
-    suggest_tags_observations__obs_id__suggest_tags_post: {
+    observation_people_observations__obs_id__people_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2445,10 +2601,115 @@ export interface operations {
             };
         };
     };
+    assign_observation_people_observations__obs_id__people_assign_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PeopleAssignment"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suggest_tags_observations__obs_id__suggest_tags_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suggest_analysis_observations__obs_id__suggest_analysis_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                obs_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalysisSuggestionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_tags_observations__obs_id__tags_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2479,7 +2740,9 @@ export interface operations {
     add_tag_by_teacher_observations__obs_id__tags_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
             };
@@ -2514,7 +2777,9 @@ export interface operations {
     decide_tag_observations__obs_id__tags__tag_id__patch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 obs_id: number;
                 tag_id: number;
@@ -2552,7 +2817,7 @@ export interface operations {
             query?: {
                 /** @description 是否在观察分析末尾附带已采纳指标 */
                 include_indicators?: boolean;
-                /** @description docx / pdf / md */
+                /** @description docx / pdf */
                 format?: string;
             };
             header?: {
@@ -2592,7 +2857,7 @@ export interface operations {
                 month: number;
                 /** @description 是否在观察分析末尾附带已采纳指标 */
                 include_indicators?: boolean;
-                /** @description docx / pdf / md */
+                /** @description docx / pdf */
                 format?: string;
             };
             header?: {
@@ -2657,7 +2922,9 @@ export interface operations {
     ai_quality_metrics_ai_quality_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2670,6 +2937,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

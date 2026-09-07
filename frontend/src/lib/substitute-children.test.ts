@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { applyChildNames, distinctPersonRefs, findPersonRefs, isGroupRef, isGroupToken } from "./substitute-children";
+import { applyChildNames, distinctPersonRefs, findPersonRefs, groupPersonRefs, isGroupRef, isGroupToken, isAliasToken } from "./substitute-children";
 
 describe("substitute-children", () => {
+  it("已代入的完整姓名包含泛称时也不会重复替换，其他别名仍可识别", () => {
+    const names = ["测试幼儿甲", "测试幼儿乙"];
+    const original = "幼儿A背对镜头，测试幼儿乙在旁边。";
+    const refs = findPersonRefs(original, names);
+    const replaced = applyChildNames(original, refs, [names[0]]);
+    expect(replaced).toBe("测试幼儿甲背对镜头，测试幼儿乙在旁边。");
+    expect(findPersonRefs(replaced, names)).toEqual([]);
+  });
   const text = "左侧女童手握黄色捞网；中间男童低头；右侧女童在一旁。幼儿在旁观看。";
 
   it("识别白描里的人物泛称（不重复、不重叠）", () => {
@@ -76,6 +84,7 @@ describe("substitute-children", () => {
     ];
     for (const t of groupCases) {
       const ref = findPersonRefs(t)[0];
+      if (!ref) throw new Error("未识别到预期的人物称呼");
       expect(isGroupRef(t, ref), t).toBe(true);
     }
   });
@@ -91,6 +100,7 @@ describe("substitute-children", () => {
     ];
     for (const t of singularCases) {
       const ref = findPersonRefs(t)[0];
+      if (!ref) throw new Error("未识别到预期的人物称呼");
       expect(isGroupRef(t, ref), t).toBe(false);
     }
   });
@@ -102,5 +112,60 @@ describe("substitute-children", () => {
     const expected = [true, false, false, true, false];
     expect(refs.length).toBe(expected.length);
     refs.forEach((r, i) => expect(isGroupRef(t, r), `第${i}处「${r.token}」`).toBe(expected[i]));
+  });
+});
+
+describe("匿名别名（幼儿A / 幼儿B）", () => {
+  const narrative =
+    "约0.0秒的画面中，未出现指定幼儿A。约2.1秒时，幼儿A（扎马尾）从右侧入镜。约4.2秒时，幼儿A位于附近。约6.2秒时，幼儿A背向镜头。";
+
+  it("把幼儿A整体识别为一个人，而不是拆成「幼儿」+字母", () => {
+    const refs = findPersonRefs(narrative);
+    expect(refs.map((r) => r.token)).toEqual(["幼儿A", "幼儿A", "幼儿A", "幼儿A"]);
+  });
+
+  it("isAliasToken 只认别名，不认泛称/群体", () => {
+    expect(isAliasToken("幼儿A")).toBe(true);
+    expect(isAliasToken("幼儿B")).toBe(true);
+    expect(isAliasToken("幼儿")).toBe(false);
+    expect(isAliasToken("幼儿们")).toBe(false);
+    expect(isAliasToken("女童")).toBe(false);
+  });
+
+  it("distinctPersonRefs 去重后只剩别名", () => {
+    expect(distinctPersonRefs(narrative)).toEqual(["幼儿A"]);
+  });
+
+  it("groupPersonRefs 把同一别名归为一处，一次指认即代入全部出现处", () => {
+    const refs = findPersonRefs(narrative);
+    const slots = groupPersonRefs(narrative, refs);
+    expect(slots).toHaveLength(1);
+    expect(slots[0]?.token).toBe("幼儿A");
+    expect(slots[0]?.refIndexes).toEqual([0, 1, 2, 3]);
+    expect(slots[0]?.isAlias).toBe(true);
+    expect(slots[0]?.isGroup).toBe(false);
+  });
+
+  it("applyChildNames 把整个幼儿A替换成姓名", () => {
+    const refs = findPersonRefs(narrative);
+    const out = applyChildNames(narrative, refs, ["李金悦", "李金悦", "李金悦", "李金悦"]);
+    expect(out).not.toContain("幼儿A");
+    expect(out).toContain("李金悦");
+    expect(out).toContain("指定李金悦");
+  });
+
+  it("混用两位幼儿（幼儿A/幼儿B）时各自成组", () => {
+    const t = "幼儿A在搭积木，幼儿B在旁边看，幼儿A继续搭。";
+    const refs = findPersonRefs(t);
+    const slots = groupPersonRefs(t, refs);
+    expect(slots).toHaveLength(2);
+    expect(slots.map((s) => s.token)).toEqual(["幼儿A", "幼儿B"]);
+    expect(slots[0]?.refIndexes).toEqual([0, 2]);
+    expect(slots[1]?.refIndexes).toEqual([1]);
+  });
+
+  it("别名不因上下文被误判为群体", () => {
+    const refs = findPersonRefs(narrative);
+    refs.forEach((r) => expect(isGroupRef(narrative, r)).toBe(false));
   });
 });

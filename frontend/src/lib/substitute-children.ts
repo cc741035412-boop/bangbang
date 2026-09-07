@@ -28,6 +28,15 @@ const WORDS = [
 /** 群体性泛称：指代"一群孩子"，无法也无须指认到单个幼儿姓名。 */
 export const GROUP_WORDS = new Set(["小朋友们", "孩子们", "幼儿们", "各位幼儿"]);
 
+/** 后端把幼儿姓名匿名成"幼儿A / 幼儿B / 幼儿AA…"这样的别名（_child_alias）。
+ *  这是"一个人"的整体，必须整体识别，否则会把"幼儿A"误拆成泛称"幼儿"+字母。 */
+const ALIAS_RE = /幼儿([A-Za-z]+)/y;
+const ALIAS_TOKEN_RE = /^幼儿[A-Za-z]+$/;
+
+export function isAliasToken(token: string): boolean {
+  return ALIAS_TOKEN_RE.test(token);
+}
+
 export function isGroupToken(token: string): boolean {
   return GROUP_WORDS.has(token);
 }
@@ -65,10 +74,25 @@ export function isGroupRef(text: string, ref: { index: number; token: string }):
   return true;
 }
 
-export function findPersonRefs(text: string): PersonRef[] {
+export function findPersonRefs(text: string, knownNames: string[] = []): PersonRef[] {
   const refs: PersonRef[] = [];
+  const names = knownNames.filter(Boolean).sort((a, b) => b.length - a.length);
   let i = 0;
   while (i < text.length) {
+    // 已经代入的完整姓名不可再次作为泛称替换。
+    const name = names.find((item) => text.startsWith(item, i));
+    if (name) {
+      i += name.length;
+      continue;
+    }
+    // 先整体识别匿名别名（幼儿A / 幼儿B…），避免被拆成「幼儿」+字母
+    ALIAS_RE.lastIndex = i;
+    const alias = ALIAS_RE.exec(text);
+    if (alias) {
+      refs.push({ index: i, length: alias[0].length, token: alias[0] });
+      i += alias[0].length;
+      continue;
+    }
     let matched = false;
     for (const w of WORDS) {
       if (text.startsWith(w, i)) {
@@ -83,14 +107,49 @@ export function findPersonRefs(text: string): PersonRef[] {
   return refs;
 }
 
+/**
+ * 把白描的"人物引用"归组为"逻辑上的人"。
+ *  - 别名（幼儿A / 幼儿B…）同一字母是同一人 → 合并为一个槽位，一次指认即代入全部出现处；
+ *  - 泛称（女童/男童/幼儿…）同一词可能指不同的人 → 每次出现各为一个槽位（保持原逐处指认语义）。
+ * 用于避免"白描里其实是同一个幼儿A"却让老师逐处选 4 遍的困惑。
+ */
+export interface PersonSlot {
+  token: string;
+  /** 在 refs（findPersonRefs 结果）里的出现下标，全部要代入同一个名字 */
+  refIndexes: number[];
+  isAlias: boolean;
+  isGroup: boolean;
+}
+
+export function groupPersonRefs(text: string, refs: PersonRef[]): PersonSlot[] {
+  const slots: PersonSlot[] = [];
+  const aliasSlotIndex = new Map<string, number>();
+  refs.forEach((ref, i) => {
+    if (isAliasToken(ref.token)) {
+      const existing = aliasSlotIndex.get(ref.token);
+      const slot = existing === undefined ? undefined : slots[existing];
+      if (slot) {
+        slot.refIndexes.push(i);
+      } else {
+        aliasSlotIndex.set(ref.token, slots.length);
+        slots.push({ token: ref.token, refIndexes: [i], isAlias: true, isGroup: false });
+      }
+    } else {
+      slots.push({ token: ref.token, refIndexes: [i], isAlias: false, isGroup: isGroupRef(text, ref) });
+    }
+  });
+  return slots;
+}
+
 /** 按每个泛称（按下标顺序）的指派结果，把白描替换成"带幼儿名"的版本。 */
 export function applyChildNames(text: string, refs: PersonRef[], assignments: (string | undefined)[]): string {
   let out = text;
   // 从后往前替换，避免此前替换影响后续下标。
   for (let k = refs.length - 1; k >= 0; k--) {
     const name = assignments[k];
-    if (!name) continue;
-    out = out.slice(0, refs[k].index) + name + out.slice(refs[k].index + refs[k].length);
+    const ref = refs[k];
+    if (!name || !ref) continue;
+    out = out.slice(0, ref.index) + name + out.slice(ref.index + ref.length);
   }
   return out;
 }

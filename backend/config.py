@@ -22,6 +22,13 @@ UPLOAD_DIR = Path(os.getenv("BANGBANG_UPLOAD_DIR", "uploads"))
 SQL_ECHO = os.getenv("BANGBANG_SQL_ECHO", "false").strip().lower() == "true"
 
 RUNTIME_ENV = os.getenv("BANGBANG_ENV", "development").strip().lower()
+ALLOWED_HOSTS = [
+    item.strip()
+    for item in os.getenv(
+        "BANGBANG_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver"
+    ).split(",")
+    if item.strip()
+]
 SMS_PROVIDER = os.getenv("SMS_PROVIDER", "").strip().lower()
 SMS_MOCK_CODE = os.getenv("SMS_MOCK_CODE", "123456").strip()
 
@@ -63,3 +70,5 @@ ASR_API_URL = os.getenv(
     "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
 )
 ASR_TIMEOUT_SECONDS = int(os.getenv("BANGBANG_ASR_TIMEOUT_SECONDS", "120"))
+# 短视频/无声视频的降级阈值：低于该时长的视频不触发云端 ASR（省掉一次网络往返）。
+ASR_MIN_DURATION_SEC = float(os.getenv("BANGBANG_ASR_MIN_DURATION_SEC", "15"))

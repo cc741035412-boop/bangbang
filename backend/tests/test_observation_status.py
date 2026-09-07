@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import httpx
 from docx import Document
+from PIL import Image
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
@@ -18,13 +19,17 @@ from sqlmodel import Session, SQLModel, create_engine, select
 import main
 from export_service import academic_year_and_term
 from models import (
+    Account,
     AIRun,
     Area,
+    AuthSession,
     Child,
     ClassRoom,
+    Kindergarten,
     Observation,
     ObservationChild,
     ObservationTag,
+    Media,
     Teacher,
 )
 
@@ -47,8 +52,15 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
         with Session(engine) as session:
             area = Area(code="construction", name="建构区")
-            room = ClassRoom(name="中二班", age_group="middle")
+            kindergarten = Kindergarten(name="测试幼儿园")
             session.add(area)
+            session.add(kindergarten)
+            session.flush()
+            room = ClassRoom(
+                name="中二班",
+                age_group="middle",
+                kindergarten_id=kindergarten.id,
+            )
             session.add(room)
             session.commit()
             session.refresh(area)
@@ -64,25 +76,44 @@ class ObservationStatusFlowTest(unittest.TestCase):
             session.add(teacher)
             session.add(child)
             session.add(second_child)
+            session.flush()
+            account = Account(
+                phone="13800009999",
+                teacher_id=teacher.id,
+                kindergarten_id=kindergarten.id,
+            )
+            session.add(account)
+            session.flush()
+            token = main.issue_session(session, account)
             session.commit()
             session.refresh(child)
             session.refresh(second_child)
             self.area_id = area.id
             self.child_id = child.id
             self.second_child_id = second_child.id
+            self.teacher_id = teacher.id
+            self.client.headers.update({"Authorization": f"Bearer {token}"})
 
     def tearDown(self):
         self.ai_mode_patcher.stop()
         self.temp_dir.cleanup()
 
-    def create_bound_observation(self):
-        media_response = self.client.post(
-            "/uploads?duration_sec=2100",
-            files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
+    def upload_media(self, *, files, observation_id=None, path="/uploads"):
+        created_here = observation_id is None
+        if observation_id is None:
+            created = self.client.post("/observations", json={"area_id": self.area_id})
+            self.assertEqual(created.status_code, 201, created.text)
+            observation_id = created.json()["id"]
+        separator = "&" if "?" in path else "?"
+        response = self.client.post(
+            f"{path}{separator}observation_id={observation_id}",
+            files=files,
         )
-        self.assertEqual(media_response.status_code, 201)
-        media_id = media_response.json()["id"]
+        if created_here and response.status_code >= 400:
+            self.client.delete(f"/observations/{observation_id}")
+        return response
 
+    def create_bound_observation(self):
         rejected_status = self.client.post(
             "/observations",
             json={
@@ -104,12 +135,195 @@ class ObservationStatusFlowTest(unittest.TestCase):
         observation = create_response.json()
         self.assertEqual(observation["status"], "uploaded")
 
+        media_response = self.client.post(
+            f"/uploads?duration_sec=2100&observation_id={observation['id']}",
+            files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
+        )
+        self.assertEqual(media_response.status_code, 201)
+        media_id = media_response.json()["id"]
+
         attach_response = self.client.post(
             f"/observations/{observation['id']}/attach-media?media_id={media_id}"
         )
         self.assertEqual(attach_response.status_code, 200)
         self.assertEqual(attach_response.json()["status"], "uploaded")
+        self.client.patch(f"/observations/{observation['id']}", json={"purpose": "观察幼儿如何解决搭建问题", "analysis": "根据搭建行为核对判断", "strategy": "提供不同形状材料继续观察"})
         return observation["id"]
+
+    def test_identity_assignment_updates_all_mentions_and_preserves_context(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        narrative = "幼儿A穿红衣搭建。幼儿B穿蓝衣递材料。幼儿A接过材料。孩子们在旁。"
+        self.client.patch(f"/observations/{oid}", json={"narrative": narrative})
+        grouped = self.client.post(f"/observations/{oid}/people")
+        self.assertEqual(grouped.status_code, 200, grouped.text)
+        self.assertEqual([g['ref_indexes'] for g in grouped.json()['people']], [[0, 2], [1]])
+        result = self.client.post(f"/observations/{oid}/people/assign", json={"narrative": narrative, "assignments": [
+            {"ref_indexes": [0, 2], "child_id": self.child_id}, {"ref_indexes": [1], "child_id": self.second_child_id}]})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()['narrative'].count('测试幼儿A'), 2)
+        self.assertIn('测试幼儿B穿蓝衣', result.json()['narrative'])
+        self.assertIn('孩子们', result.json()['narrative'])
+        record = self.client.get(f"/observations/{oid}").json()
+        self.assertFalse(record['narrative_context_changed'])
+        self.assertEqual(len(record['children']), 2)
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 200)
+        stale = self.client.post(f"/observations/{oid}/people/assign", json={"narrative": narrative, "assignments": [{"ref_indexes": [0], "child_id": self.child_id}]})
+        self.assertEqual(stale.status_code, 409)
+
+    def test_identity_assignment_rejects_invalid_refs_and_unauthenticated(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        narrative = "幼儿A穿红衣。孩子们在旁。"
+        self.client.patch(f"/observations/{oid}", json={"narrative": narrative})
+        for refs, child, expected in [([1], self.child_id, 422), ([0, 0], self.child_id, 422), ([0], 999999, 404)]:
+            result = self.client.post(f"/observations/{oid}/people/assign", json={"narrative": narrative, "assignments": [{"ref_indexes": refs, "child_id": child}]})
+            self.assertEqual(result.status_code, expected, result.text)
+        self.assertEqual(self.client.get(f"/observations/{oid}").json()['narrative'], narrative)
+        self.assertEqual(TestClient(main.app).post(f"/observations/{oid}/people").status_code, 401)
+
+    def test_analysis_and_strategy_required_for_confirmation_and_export(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        self.client.post(f"/observations/{oid}/suggest-tags")
+        self.client.post(f"/observations/{oid}/tags", json={"indicator_code": "4.4", "level": 1})
+        for field in ['analysis', 'strategy']:
+            self.client.patch(f"/observations/{oid}", json={field: "  "})
+            denied = self.client.post(f"/observations/{oid}/confirm")
+            self.assertEqual(denied.status_code, 400, denied.text)
+            self.assertIn('观察分析' if field == 'analysis' else '支持策略', denied.json()['detail'])
+            self.client.patch(f"/observations/{oid}", json={field: "教师核对内容"})
+        self.assertEqual(self.client.post(f"/observations/{oid}/confirm").status_code, 200)
+        self.assertEqual(self.client.get(f"/observations/{oid}/export").status_code, 200)
+        cleared = self.client.patch(f"/observations/{oid}", json={"analysis": " "})
+        self.assertEqual(cleared.json()['status'], 'ready_for_review')
+        self.assertEqual(self.client.get(f"/observations/{oid}/export").status_code, 400)
+
+    def test_focused_context_reaches_vision_and_reasoner_anonymized(self):
+        oid = self.create_bound_observation()
+        self.client.patch(f"/observations/{oid}", json={
+            "purpose": "观察测试幼儿A如何换材料\n观察测试幼儿A如何求助",
+            "note": "测试幼儿A是左侧红衣幼儿",
+        })
+        with patch.object(main.ai_service, "generate_narrative", wraps=main.ai_service.generate_narrative) as vision:
+            result = self.client.post(f"/observations/{oid}/narrative")
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("如何换材料", vision.call_args.kwargs["purpose"])
+        self.assertIn("左侧红衣幼儿", vision.call_args.kwargs["subject_context"])
+        self.assertNotIn("测试幼儿A", vision.call_args.kwargs["purpose"])
+        with patch.object(main.ai_service, "suggest_indicators", wraps=main.ai_service.suggest_indicators) as reasoner:
+            result = self.client.post(f"/observations/{oid}/suggest-tags")
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("如何换材料", reasoner.call_args.kwargs["purpose"])
+        self.assertEqual(reasoner.call_args.kwargs["narrative"], self.client.get(f"/observations/{oid}").json()["narrative"])
+
+    def test_exploration_allows_no_goal_but_recommendation_requires_one(self):
+        oid = self.create_bound_observation()
+        self.client.patch(f"/observations/{oid}", json={"purpose": ""})
+        self.assertEqual(self.client.post(f"/observations/{oid}/narrative").status_code, 400)
+        with patch.object(main.ai_service, "generate_narrative", wraps=main.ai_service.generate_narrative) as vision:
+            self.assertEqual(self.client.post(f"/observations/{oid}/narrative?mode=explore").status_code, 200)
+        self.assertEqual(vision.call_args.kwargs["purpose"], "")
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 400)
+        goal = "观察倒塌后怎样改变底座\n观察向同伴求助的方式"
+        self.client.patch(f"/observations/{oid}", json={"purpose": goal})
+        self.assertEqual(self.client.get(f"/observations/{oid}").json()["purpose"], goal)
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 200)
+
+    def test_changed_goal_requires_fresh_focused_narrative(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        self.client.post(f"/observations/{oid}/suggest-tags")
+        self.client.patch(f"/observations/{oid}", json={"purpose": "观察如何选材料"})
+        detail = self.client.get(f"/observations/{oid}").json()
+        self.assertTrue(detail["narrative_context_changed"])
+        self.assertTrue(detail["suggestions_stale"])
+        self.assertFalse(detail["tags"])
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 409)
+        self.assertEqual(self.client.post(f"/observations/{oid}/narrative").status_code, 200)
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 200)
+        self.assertFalse(self.client.get(f"/observations/{oid}").json()["suggestions_stale"])
+
+    def test_changed_narrative_keeps_audit_but_does_not_reuse_old_decisions(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        first = self.client.post(f"/observations/{oid}/suggest-tags").json()
+        old_id = first["suggestions"][0]["tag_id"]
+        self.client.patch(f"/observations/{oid}/tags/{old_id}", json={"accepted": True})
+        with patch.object(main.ai_service, "suggest_indicators") as reasoner:
+            self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 200)
+            reasoner.assert_not_called()
+        self.client.patch(f"/observations/{oid}", json={"narrative": "幼儿A将两块积木放在桌上。"})
+        self.assertEqual(self.client.post(f"/observations/{oid}/confirm").status_code, 400)
+        self.assertEqual(self.client.patch(f"/observations/{oid}/tags/{old_id}", json={"accepted": False}).status_code, 409)
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 200)
+        detail = self.client.get(f"/observations/{oid}").json()
+        self.assertNotIn(old_id, [tag["id"] for tag in detail["tags"]])
+        with Session(main.engine) as session:
+            self.assertTrue(session.get(ObservationTag, old_id).accepted)
+            current = main.export_observation_data(session, session.get(Observation, oid))
+            self.assertIsNotNone(current)
+
+    def test_switching_primary_keeps_roles_and_invalidates_old_results(self):
+        oid = self.create_bound_observation()
+        endpoint = f"/observations/{oid}"
+        self.client.put(endpoint + '/children', json={'child_ids': [self.child_id, self.second_child_id]})
+        self.client.patch(endpoint, json={'note': '测试幼儿A是左侧红衣幼儿，测试幼儿B是右侧蓝衣幼儿'})
+        self.client.post(endpoint + '/narrative')
+        self.client.post(endpoint + '/suggest-tags')
+        swapped = self.client.put(endpoint + '/children', json={'child_ids': [self.second_child_id, self.child_id]})
+        self.assertEqual(swapped.status_code, 200)
+        record = self.client.get(endpoint).json()
+        self.assertEqual(record['child_id'], self.second_child_id)
+        self.assertEqual([c['id'] for c in record['children'] if c['is_primary']], [self.second_child_id])
+        self.assertTrue(record['narrative_context_changed'])
+        self.assertTrue(record['suggestions_stale'])
+        self.assertEqual(self.client.post(endpoint + '/suggest-tags').status_code, 409)
+        with patch.object(main.ai_service, 'generate_narrative', wraps=main.ai_service.generate_narrative) as vision:
+            self.assertEqual(self.client.post(endpoint + '/narrative').status_code, 200)
+        subjects = vision.call_args.kwargs['subject_context']
+        self.assertIn('主观察幼儿：幼儿A', subjects)
+        self.assertIn('同时记录的其他幼儿：幼儿B', subjects)
+        self.assertIn('幼儿A是右侧蓝衣幼儿', subjects)
+        self.assertIn('幼儿B是左侧红衣幼儿', subjects)
+        self.assertNotIn('测试幼儿', subjects)
+
+    def test_changed_subject_invalidates_narrative_even_in_exploration(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative?mode=explore")
+        self.client.put(f"/observations/{oid}/children", json={"child_ids": [self.second_child_id]})
+        self.assertTrue(self.client.get(f"/observations/{oid}").json()["narrative_context_changed"])
+        self.assertEqual(self.client.post(f"/observations/{oid}/suggest-tags").status_code, 409)
+
+    def test_confirmed_factual_edit_returns_to_draft(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        self.client.post(f"/observations/{oid}/tags", json={"indicator_code": "1.2", "level": 1})
+        self.assertEqual(self.client.post(f"/observations/{oid}/confirm").status_code, 200)
+        unchanged = self.client.patch(f"/observations/{oid}", json={"analysis": "教师补充的分析"}).json()
+        self.assertEqual(unchanged["status"], "confirmed")
+        changed = self.client.patch(f"/observations/{oid}", json={"purpose": "观察怎样更换材料"}).json()
+        self.assertEqual(changed["status"], "ready_for_review")
+        self.assertIsNone(changed["confirmed_at"])
+        self.assertEqual(self.client.post(f"/observations/{oid}/confirm").status_code, 409)
+
+    def test_empty_evidence_result_is_not_replaced_with_fabricated_fallback(self):
+        oid = self.create_bound_observation()
+        self.client.post(f"/observations/{oid}/narrative")
+        response = httpx.Response(200, json={"choices": [{"message": {"content": '{"suggestions": []}'}}]},
+                                  request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"))
+        with patch.object(main.ai_service, "AI_MODE", "deepseek"), patch.object(main.ai_service, "DEEPSEEK_API_KEY", "test-key"), patch.object(main.ai_service.httpx, "post", return_value=response) as post:
+            first = self.client.post(f"/observations/{oid}/suggest-tags").json()
+            second = self.client.post(f"/observations/{oid}/suggest-tags").json()
+        self.assertEqual(post.call_count, 1)
+        self.assertFalse(first["is_mock"])
+        self.assertEqual(first["suggestions"], [])
+        self.assertEqual(second["suggestions"], [])
+        self.assertTrue(self.client.get(f"/observations/{oid}").json()["suggestions_ready"])
+        added = self.client.post(f"/observations/{oid}/tags", json={"indicator_code": "1.2", "level": 1})
+        self.assertEqual(added.status_code, 201)
+        self.assertIn(added.json()["id"], [tag["id"] for tag in self.client.get(f"/observations/{oid}").json()["tags"]])
+        self.assertEqual(self.client.post(f"/observations/{oid}/confirm").status_code, 200)
 
     def test_complete_flow_filter_and_illegal_transition(self):
         observation_id = self.create_bound_observation()
@@ -118,6 +332,17 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(illegal.status_code, 400)
         self.assertEqual(illegal.json()["detail"]["current_status"], "uploaded")
         self.assertEqual(illegal.json()["detail"]["target_status"], "confirmed")
+
+        update_context = self.client.patch(
+            f"/observations/{observation_id}",
+            json={
+                "child_id": self.child_id,
+                "note": "确认时补充",
+                "purpose": "观察幼儿如何解决搭建问题",
+            },
+        )
+        self.assertEqual(update_context.status_code, 200)
+        self.assertEqual(update_context.json()["note"], "确认时补充")
 
         narrative = self.client.post(f"/observations/{observation_id}/narrative")
         self.assertEqual(narrative.status_code, 200)
@@ -157,12 +382,6 @@ class ObservationStatusFlowTest(unittest.TestCase):
         )
         self.assertFalse(restored_system["accepted"])
 
-        update_context = self.client.patch(
-            f"/observations/{observation_id}",
-            json={"child_id": self.child_id, "note": "确认时补充"},
-        )
-        self.assertEqual(update_context.status_code, 200)
-        self.assertEqual(update_context.json()["note"], "确认时补充")
 
         ready_items = self.client.get(
             "/observations", params={"status": "ready_for_review"}
@@ -241,22 +460,18 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
     def test_confirmation_requires_child_without_changing_age_snapshot(self):
         created = self.client.post("/observations", json={"area_id": self.area_id}).json()
-        media = self.client.post(
-            "/uploads",
+        media = self.upload_media(
+            observation_id=created["id"],
             files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
         ).json()
         self.client.post(
             f"/observations/{created['id']}/attach-media",
             params={"media_id": media["id"]},
         )
-        self.client.post(f"/observations/{created['id']}/narrative")
-        suggestions = self.client.post(
-            f"/observations/{created['id']}/suggest-tags"
-        ).json()
-        self.client.patch(
-            f"/observations/{created['id']}/tags/{suggestions['suggestions'][0]['tag_id']}",
-            json={"accepted": True},
-        )
+        self.assertEqual(self.client.post(f"/observations/{created['id']}/narrative?mode=explore").status_code, 200)
+        self.client.patch(f"/observations/{created['id']}", json={"child_id": self.child_id})
+        self.assertEqual(self.client.post(f"/observations/{created['id']}/narrative?mode=explore").status_code, 200)
+        self.client.patch(f"/observations/{created['id']}", json={"child_id": None})
 
         missing_child = self.client.post(f"/observations/{created['id']}/confirm")
         self.assertEqual(missing_child.status_code, 400)
@@ -274,6 +489,16 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(patched["classroom_id"], original_classroom_id)
         self.assertEqual(patched["age_group"], original_age_group)
 
+        missing_purpose = self.client.post(f"/observations/{created['id']}/confirm")
+        self.assertEqual(missing_purpose.status_code, 400)
+        self.assertEqual(missing_purpose.json()["detail"], "请至少填写一个观察目标")
+
+        self.client.patch(
+            f"/observations/{created['id']}",
+            json={"purpose": "观察幼儿如何持续参与游戏", "analysis": "持续参与搭建", "strategy": "继续提供材料"},
+        )
+        suggestions = self.client.post(f"/observations/{created['id']}/suggest-tags").json()
+        self.client.patch(f"/observations/{created['id']}/tags/{suggestions['suggestions'][0]['tag_id']}", json={"accepted": True})
         confirmed = self.client.post(f"/observations/{created['id']}/confirm")
         self.assertEqual(confirmed.status_code, 200)
         self.assertIsNotNone(confirmed.json()["observation"]["confirmed_at"])
@@ -341,8 +566,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
         missing_area = self.client.post("/observations", json={})
         self.assertEqual(missing_area.status_code, 422)
 
-        jpg = self.client.post(
-            "/uploads",
+        jpg = self.upload_media(
+            observation_id=observation["id"],
             files={"file": ("mock.jpg", b"mock-image", "image/jpeg")},
         )
         self.assertEqual(jpg.status_code, 201)
@@ -353,8 +578,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(attached_jpg.status_code, 200)
         self.assertEqual(attached_jpg.json()["media_type"], "image")
 
-        second_media = self.client.post(
-            "/uploads",
+        second_media = self.upload_media(
+            observation_id=observation["id"],
             files={"file": ("second.mp4", b"second-video", "video/mp4")},
         )
         attached_second = self.client.post(
@@ -367,8 +592,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
         video_observation = self.client.post(
             "/observations", json={"area_id": self.area_id}
         ).json()
-        mp4 = self.client.post(
-            "/uploads",
+        mp4 = self.upload_media(
+            observation_id=video_observation["id"],
             files={"file": ("mock.mp4", b"mock-video", "video/mp4")},
         )
         self.assertEqual(mp4.status_code, 201)
@@ -404,7 +629,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 child_id=self.child_id,
                 area_id=self.area_id,
                 classroom_id=1,
-                observer_id=1,
+                observer_id=self.teacher_id,
                 age_group="middle",
                 status="confirmed",
             )
@@ -412,7 +637,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 child_id=self.second_child_id,
                 area_id=self.area_id,
                 classroom_id=1,
-                observer_id=1,
+                observer_id=self.teacher_id,
                 age_group="middle",
                 status="confirmed",
             )
@@ -461,7 +686,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 child_id=self.child_id,
                 area_id=self.area_id,
                 classroom_id=1,
-                observer_id=1,
+                observer_id=self.teacher_id,
                 observed_at=observed_at,
                 age_group="middle",
                 status="confirmed",
@@ -492,6 +717,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                     level=2,
                     source="ai_suggested",
                     accepted=True,
+                    ai_reason='白描原文："幼儿反复尝试不同方法"。',
                 ),
                 ObservationTag(
                     observation_id=observation.id,
@@ -514,11 +740,12 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 child_id=self.child_id,
                 area_id=self.area_id,
                 classroom_id=1,
-                observer_id=1,
+                observer_id=self.teacher_id,
                 observed_at=datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc),
                 age_group="middle",
                 status="confirmed",
                 narrative="第二条月度记录",
+                analysis="核对持续参与行为", strategy="继续提供材料",
             )
             session.add(second_observation)
             session.flush()
@@ -526,6 +753,14 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 observation_id=second_observation.id,
                 child_id=self.child_id,
                 is_primary=True,
+            ))
+            photo_path = main.UPLOAD_DIR / "export-photo.png"
+            Image.new("RGB", (80, 60), color=(80, 150, 110)).save(photo_path)
+            session.add(Media(
+                stored_filename=photo_path.name,
+                content_type="image/png",
+                size=photo_path.stat().st_size,
+                observation_id=observation.id,
             ))
             session.commit()
             observation_id = observation.id
@@ -542,6 +777,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         )
         document = Document(BytesIO(exported.content))
         self.assertEqual(len(document.tables), 1)
+        self.assertEqual(len(document.inline_shapes), 1)
         table = document.tables[0]
         self.assertEqual(len(table.rows), 8)
         self.assertEqual(len(table.columns), 4)
@@ -566,35 +802,11 @@ class ObservationStatusFlowTest(unittest.TestCase):
         )
         indicator_document = Document(BytesIO(with_indicators.content))
         analysis_text = indicator_document.tables[0].cell(6, 1).text
-        self.assertIn("【关联指标】4.4 试误与问题解决·中阶；1.2 身体探索方式·初阶", analysis_text)
+        # 指标推荐要具体到层级，并带行为锚点描述与白描原文回溯的证据
+        self.assertIn("【关联指标】4.4 试误与问题解决·中阶", analysis_text)
+        self.assertIn("1.2 身体探索方式·初阶", analysis_text)
+        self.assertIn("行为证据", analysis_text)
         self.assertNotIn("3.1 互动形式", analysis_text)
-
-        markdown = self.client.get(
-            f"/observations/{observation_id}/export",
-            params={"include_indicators": "true", "format": "md"},
-        )
-        self.assertEqual(markdown.status_code, 200)
-        self.assertEqual(markdown.headers["content-type"], "text/markdown; charset=utf-8")
-        self.assertIn(".md", markdown.headers["content-disposition"])
-        markdown_text = markdown.content.decode("utf-8")
-        for expected in (
-            "# 测试幼儿A、测试幼儿B的观察记录",
-            "## 基本信息",
-            "幼儿：测试幼儿A、测试幼儿B",
-            "观察者：测试教师",
-            "## 观察目的",
-            "观察幼儿解决问题的过程",
-            "## 观察记录",
-            "1. 先放下长条积木。",
-            "## 观察分析",
-            "4.4 试误与问题解决·中阶",
-            "1.2 身体探索方式·初阶",
-            "## 下一步支持策略",
-            "提供更多不同形状的材料。",
-            "记录人：测试教师",
-        ):
-            self.assertIn(expected, markdown_text)
-        self.assertNotIn("3.1 互动形式", markdown_text)
 
         pdf = self.client.get(
             f"/observations/{observation_id}/export",
@@ -604,6 +816,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(pdf.headers["content-type"], "application/pdf")
         self.assertIn(".pdf", pdf.headers["content-disposition"])
         self.assertTrue(pdf.content.startswith(b"%PDF-"))
+        self.assertIn(b"/Subtype /Image", pdf.content)
 
         invalid_format = self.client.get(
             f"/observations/{observation_id}/export",
@@ -612,7 +825,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(invalid_format.status_code, 422)
         self.assertEqual(
             invalid_format.json()["detail"],
-            "导出格式只支持 docx、pdf 或 md",
+            "导出格式只支持 docx、pdf",
         )
 
         monthly = self.client.get("/exports/monthly", params={"year": 2026, "month": 8})
@@ -628,16 +841,6 @@ class ObservationStatusFlowTest(unittest.TestCase):
         )
         self.assertEqual(monthly_pdf.status_code, 200)
         self.assertTrue(monthly_pdf.content.startswith(b"%PDF-"))
-        monthly_markdown = self.client.get(
-            "/exports/monthly",
-            params={"year": 2026, "month": 8, "format": "md"},
-        )
-        self.assertEqual(monthly_markdown.status_code, 200)
-        markdown_titles = [
-            line for line in monthly_markdown.content.decode("utf-8").splitlines()
-            if line.startswith("# ")
-        ]
-        self.assertEqual(len(markdown_titles), 2)
 
         missing_month = self.client.get(
             "/exports/monthly", params={"year": 2025, "month": 7}
@@ -652,7 +855,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
             unconfirmed = Observation(
                 area_id=self.area_id,
                 classroom_id=1,
-                observer_id=1,
+                observer_id=self.teacher_id,
                 age_group="middle",
                 status="ready_for_review",
             )
@@ -683,8 +886,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
     def test_upload_limit_and_read_media_file(self):
         image_content = b"mock-image-content"
-        uploaded = self.client.post(
-            "/uploads",
+        uploaded = self.upload_media(
             files={"file": ("mock.jpg", image_content, "image/jpeg")},
         )
         self.assertEqual(uploaded.status_code, 201)
@@ -698,8 +900,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
 
         with patch.object(main, "MAX_SIZE", 8):
-            too_large = self.client.post(
-                "/uploads",
+            too_large = self.upload_media(
                 files={"file": ("large.mp4", b"123456789", "video/mp4")},
             )
         self.assertEqual(too_large.status_code, 413)
@@ -707,8 +908,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
     def test_upload_rejects_video_over_duration_limit(self):
         with patch.object(main, "_probe_video_duration", return_value=300):
-            resp = self.client.post(
-                "/uploads",
+            resp = self.upload_media(
                 files={"file": ("long.mp4", b"mock-video", "video/mp4")},
             )
         self.assertEqual(resp.status_code, 422)
@@ -716,8 +916,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
     def test_upload_stores_real_video_duration(self):
         with patch.object(main, "_probe_video_duration", return_value=120):
-            resp = self.client.post(
-                "/uploads",
+            resp = self.upload_media(
                 files={"file": ("clip.mp4", b"mock-video", "video/mp4")},
             )
         self.assertEqual(resp.status_code, 201)
@@ -739,16 +938,15 @@ class ObservationStatusFlowTest(unittest.TestCase):
 
         for filename, sent_type, expected_type, expected_media_type in cases:
             with self.subTest(filename=filename, sent_type=sent_type):
-                uploaded = self.client.post(
-                    "/uploads",
+                observation = self.client.post(
+                    "/observations", json={"area_id": self.area_id}
+                ).json()
+                uploaded = self.upload_media(
+                    observation_id=observation["id"],
                     files={"file": (filename, b"mock-iphone-media", sent_type)},
                 )
                 self.assertEqual(uploaded.status_code, 201)
                 self.assertEqual(uploaded.json()["content_type"], expected_type)
-
-                observation = self.client.post(
-                    "/observations", json={"area_id": self.area_id}
-                ).json()
                 attached = self.client.post(
                     f"/observations/{observation['id']}/attach-media",
                     params={"media_id": uploaded.json()["id"]},
@@ -756,8 +954,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
                 self.assertEqual(attached.status_code, 200)
                 self.assertEqual(attached.json()["media_type"], expected_media_type)
 
-        rejected = self.client.post(
-            "/uploads",
+        rejected = self.upload_media(
             files={"file": ("notes.txt", b"not-media", "text/plain")},
         )
         self.assertEqual(rejected.status_code, 400)
@@ -798,8 +995,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
             return None
 
         with patch.object(main, "generate_video_thumbnail", side_effect=create_thumbnail):
-            uploaded = self.client.post(
-                "/uploads",
+            uploaded = self.upload_media(
                 files={"file": ("iphone.mov", b"mock-mov", "video/quicktime")},
             )
 
@@ -815,8 +1011,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
             return reason
 
         with patch.object(main, "generate_video_thumbnail", side_effect=fail_thumbnail):
-            failed_upload = self.client.post(
-                "/uploads",
+            failed_upload = self.upload_media(
                 files={"file": ("unsupported.mov", b"bad-codec", "video/quicktime")},
             )
         failed_media = failed_upload.json()
@@ -866,6 +1061,8 @@ class ObservationStatusFlowTest(unittest.TestCase):
             session.add(old_primary)
             session.add(observation)
             session.commit()
+        self.client.post(f"/observations/{observation_id}/narrative")
+        self.client.patch(f"/observations/{observation_id}", json={"narrative": original_narrative})
         model_content = {
             "suggestions": [
                 {
@@ -984,7 +1181,7 @@ class ObservationStatusFlowTest(unittest.TestCase):
         with Session(main.engine) as session:
             run = session.get(AIRun, body["ai_run_id"])
             self.assertEqual(run.status, "completed")
-            self.assertEqual(run.prompt_version, "wf-b-v2")
+            self.assertEqual(run.prompt_version, "wf-b-v3")
             self.assertEqual(run.temperature, 1.0)
             self.assertEqual(run.token_usage["total_tokens"], 1380)
             self.assertNotIn("张小雨", run.prompt_rendered)

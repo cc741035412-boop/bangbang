@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: bangbang-shiji-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./deploy/Dockerfile.render
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: BANGBANG_ENV
+        value: demo
+      - key: BANGBANG_DATA_DIR
+        value: /tmp/bangbang-data
+      - key: BANGBANG_AI_MODE
+        value: mock
+      - key: BANGBANG_VISION_MODE
+        value: mock
+      - key: BANGBANG_ASR_MODE
+        value: mock
+      - key: SMS_PROVIDER
+        value: mock
+      - key: SMS_MOCK_CODE
+        value: "123456"

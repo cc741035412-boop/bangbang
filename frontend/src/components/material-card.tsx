@@ -1,7 +1,9 @@
 import { ChevronRight, Play } from "lucide-react";
 import { Link } from "react-router";
 
+import { AreaBadge } from "./area-badge";
 import { MediaThumbnail } from "./media-thumbnail";
+import { childAccent } from "../lib/child-colors";
 import type { Media, Observation } from "../features/observations/api";
 import { formatKindergartenTime } from "../lib/date-time";
 
@@ -23,6 +25,7 @@ export function MaterialCard({ areaName, childName, media, record }: {
   const destination = record.status === "confirmed" ? `/observations/${record.id}` : `/observations/${record.id}/review`;
   const duration = formatDuration(media?.duration_sec ?? 0);
   const status = STATUS[record.status];
+  const childColor = childAccent(record.child_id ?? 0);
 
   return (
     <Link aria-label={`打开${areaName}记录`} className="flex items-center gap-3 rounded-2xl border border-[#e0ddd5] bg-white p-3 text-inherit shadow-[0_1px_3px_rgba(38,45,40,0.03)]" to={destination}>
@@ -34,8 +37,13 @@ export function MaterialCard({ areaName, childName, media, record }: {
       <div className="min-w-0 flex-1">
         <p className="truncate text-[16px] font-bold">{areaName} · {isVideo ? "视频" : "照片"}</p>
         <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-ink-muted">
-          <span className="rounded-full bg-[#e8f3ed] px-2.5 py-1 text-brand">{childName}</span>
-          <span className="rounded-full bg-[#f0efeb] px-2.5 py-1">{areaName}</span>
+          <span
+            className="rounded-full px-2.5 py-1"
+            style={{ backgroundColor: childColor.bg, color: childColor.text }}
+          >
+            {childName}
+          </span>
+          <AreaBadge name={areaName} />
           <span className="rounded-full bg-[#f0efeb] px-2.5 py-1">{formatKindergartenTime(record.created_at ?? record.observed_at)}</span>
         </div>
         <p className={`mt-2 text-sm ${status.className}`}>{status.label}</p>

@@ -1,14 +1,16 @@
-import { ChevronRight, Download, FolderOpen, LogOut, School, Search, Settings, ShieldCheck, Users } from "lucide-react";
+import { ChevronRight, Download, FolderOpen, LogOut, PersonStanding, School, Search, Settings, ShieldCheck } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 
 import { HomeTabBar } from "../components/home-tab-bar";
 import { MobilePage } from "../components/mobile-page";
+import { PwaInstallCard } from "../components/pwa-install-card";
 import { FEATURES } from "../config/features";
 import { useLogout } from "../features/auth/api";
 import { useAuth } from "../features/auth/auth-context-value";
 import { getMonthlyExportUrl, useTodayMediaData } from "../features/observations/api";
 import { useSettingsData } from "../features/settings/api";
+import { childAccent } from "../lib/child-colors";
 import { getKindergartenYearMonth, isKindergartenYearMonth } from "../lib/date-time";
 
 export function MinePage() {
@@ -38,12 +40,12 @@ export function MinePage() {
   const hasError = observations.isError || children.isError || teachers.isError;
 
   // 还没接后端的能力一律不出现入口，避免出现点不动的按钮
-  const notConnected = [
+  const notConnected = ([
     !FEATURES.auth && "账号",
     !FEATURES.kindergarten && "园所",
     !FEATURES.childMutation && "幼儿新增与删除",
     !FEATURES.exportHistory && "导出历史",
-  ].filter(Boolean) as string[];
+  ] as (string | false)[]).filter((item): item is string => typeof item === "string");
 
   return (
     <MobilePage>
@@ -71,7 +73,7 @@ export function MinePage() {
           </p>
         )}
 
-        <SectionTitle hint={`${children.data?.length ?? 0} 名`}>幼儿档案库</SectionTitle>
+        <SectionTitle hint={`${children.data?.length ?? 0} 名`} icon={<PersonStanding className="text-brand" size={19} />}>幼儿档案库</SectionTitle>
         <section
           aria-label="幼儿档案库"
           className="overflow-x-auto rounded-2xl border border-[#dfdcd4] bg-white px-4 py-5"
@@ -81,9 +83,13 @@ export function MinePage() {
           ) : (
             <div className="flex min-w-max gap-7">
               {(children.data ?? []).map((child) => {
+                const avatar = childAccent(child.id);
                 const inner = (
                   <>
-                    <div className="mx-auto grid size-14 place-items-center rounded-full bg-[#e7f3ed] text-xl font-bold text-brand">
+                    <div
+                      className="mx-auto grid size-14 place-items-center rounded-full text-xl font-bold"
+                      style={{ backgroundColor: avatar.bg, color: avatar.text }}
+                    >
                       {child.name.trim().charAt(0) || "幼"}
                     </div>
                     <p className="mt-2 truncate font-medium">{child.name}</p>
@@ -117,20 +123,20 @@ export function MinePage() {
             download
             href={getMonthlyExportUrl(currentMonth.year, currentMonth.month, true)}
           >
-            <Download className="text-brand" size={22} />
+            <Download className="text-[#b9813f]" size={22} />
             <span className="flex-1 font-medium">导出本月 Word</span>
             <span className="text-sm text-[#8b9994]">{monthCount} 篇</span>
             <ChevronRight className="text-[#c5cbc8]" size={19} />
           </a>
 
           {FEATURES.exportHistory && (
-            <RowLink icon={<FolderOpen className="text-brand" size={22} />} label="导出记录" to="/exports" />
+            <RowLink icon={<FolderOpen className="text-[#3e7ca6]" size={22} />} label="导出记录" to="/exports" />
           )}
 
-          <RowLink icon={<Settings className="text-brand" size={22} />} label="基础信息设置" to="/settings" />
+          <RowLink icon={<Settings className="text-[#8b9994]" size={22} />} label="基础信息设置" to="/settings" />
 
           {FEATURES.childMutation && (
-            <RowLink icon={<Users className="text-brand" size={22} />} label="管理幼儿档案" to="/children" />
+            <RowLink icon={<PersonStanding className="text-[#2f8f7c]" size={22} />} label="管理幼儿档案" to="/children" />
           )}
         </section>
 
@@ -148,7 +154,7 @@ export function MinePage() {
               )}
               {FEATURES.kindergarten && (
                 <RowLink
-                  icon={<School className="text-brand" size={22} />}
+                  icon={<School className="text-[#a46bb8]" size={22} />}
                   label="所在园所"
                   to="/kindergarten"
                   value={account?.kindergarten_name ?? undefined}
@@ -175,6 +181,9 @@ export function MinePage() {
             {notConnected.join("、")}尚未接入后端，因此本页不展示这些入口。
           </p>
         )}
+
+        <SectionTitle>体验版</SectionTitle>
+        <PwaInstallCard />
       </div>
       <HomeTabBar active="mine" />
     </MobilePage>
@@ -205,10 +214,11 @@ function RowLink({
   );
 }
 
-function SectionTitle({ children, hint }: { children: ReactNode; hint?: string }) {
+function SectionTitle({ children, hint, icon }: { children: ReactNode; hint?: string; icon?: ReactNode }) {
   return (
     <div className="mb-3 mt-8 flex items-center gap-2">
       <span className="h-6 w-1 rounded bg-brand" />
+      {icon && <span className="grid size-6 place-items-center rounded-full bg-white">{icon}</span>}
       <h2 className="text-xl font-bold">{children}</h2>
       {hint && <span className="ml-auto text-sm text-[#8b9994]">{hint}</span>}
     </div>

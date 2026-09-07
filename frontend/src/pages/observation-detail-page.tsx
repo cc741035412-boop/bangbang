@@ -1,8 +1,8 @@
-import { ArrowDown, Download, FileText, Home, LoaderCircle, Share2, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, Download, FileText, Home, LoaderCircle, Share2, Trash2, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { BackButton } from "../components/back-button";
+import { AreaBadge } from "../components/area-badge";
 import { MobilePage } from "../components/mobile-page";
 import { ExportFormatSheet } from "../components/export-format-sheet";
 import {
@@ -60,12 +60,13 @@ export function ObservationDetailPage() {
     return <ExportSuccessView exportedFile={exportedFile} onDownload={() => triggerBrowserDownload(exportedFile)} />;
   }
 
+  const writingComplete = Boolean(record.analysis?.trim() && record.strategy?.trim());
   const acceptedTags = record.tags.filter((tag) => tag.accepted === true);
   const observedDate = DATE_FORMATTER.format(new Date(record.observed_at));
   const duration = formatDuration(record.media.reduce((sum, media) => sum + (media.duration_sec ?? 0), 0));
 
   async function runExport() {
-    if (!selectedFormat) return;
+    if (!selectedFormat || !writingComplete) return;
     setExporting(true);
     setExportError("");
     try {
@@ -84,16 +85,19 @@ export function ObservationDetailPage() {
     <MobilePage>
       <article className="min-h-dvh bg-[#f7f6f1] pb-36">
         <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b border-stone-200/80 bg-[#f7f6f1]/95 px-5 backdrop-blur">
-          <BackButton className="grid size-10 place-items-center text-ink-muted" label="返回上一页" size={22} />
-          <h1 className="text-xl font-bold">完整稿</h1>
+          <Link aria-label="返回草稿" className="grid size-10 place-items-center text-ink-muted" to={`/observations/${id}/review`}>
+            <ArrowLeft size={22} />
+          </Link>
+          <h1 className="text-xl font-bold">{writingComplete ? "完整稿" : "待补全记录"}</h1>
           <span className="w-10 text-right text-sm text-ink-muted">已保存</span>
         </header>
 
         <div className="px-4 py-4">
+          {!writingComplete && <p className="mb-4 rounded-xl bg-amber-50 p-3 text-sm leading-6 text-amber-800">观察分析和支持策略均为必填，请补全后再导出。</p>}
           <div className="rounded-[22px] border border-[#ddd9cf] bg-white px-5 py-8 shadow-[0_2px_10px_rgba(36,37,32,0.04)]">
             <div className="text-center">
               <h2 className="text-[26px] font-bold tracking-[-0.03em]">{record.child_name ?? "未指定幼儿"}的观察记录</h2>
-              <p className="mt-3 text-sm text-[#8a9792]">{observedDate} · {record.area_name ?? "未填写区域"}</p>
+              <p className="mt-3 flex items-center justify-center gap-2 text-sm text-[#8a9792]">{observedDate}<AreaBadge name={record.area_name ?? "未填写区域"} /></p>
             </div>
             <div className="my-6 border-t border-[#e5e1d8]" />
 
@@ -126,7 +130,7 @@ export function ObservationDetailPage() {
       <div className="safe-bottom fixed inset-x-0 bottom-0 z-20 mx-auto w-full max-w-[430px] border-t border-stone-200 bg-[#f7f6f1]/95 px-4 pt-3 backdrop-blur">
         <div className="grid grid-cols-[1fr_1.7fr] gap-3">
           <Link className="flex min-h-14 items-center justify-center rounded-2xl border border-[#dedbd2] bg-white font-bold text-ink-muted" to={`/observations/${id}/review`}>返回编辑</Link>
-          <button className="min-h-14 rounded-2xl bg-brand font-bold text-white" onClick={() => setExportOpen(true)} type="button">导出</button>
+          {writingComplete ? <button className="min-h-14 rounded-2xl bg-brand font-bold text-white" onClick={() => setExportOpen(true)} type="button">导出</button> : <Link className="flex min-h-14 items-center justify-center rounded-2xl bg-brand font-bold text-white" to={`/observations/${id}/review?step=writing`}>补全分析与策略</Link>}
         </div>
         <button
           className="mt-2 flex min-h-11 w-full items-center justify-center gap-1.5 rounded-2xl border border-[#dfdcd4] bg-white font-medium text-[#b4453c] disabled:opacity-50"

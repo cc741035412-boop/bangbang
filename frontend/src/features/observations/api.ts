@@ -1,7 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { createSelectionQueue, type SelectionState } from "./selection-queue";
+import { useInfiniteQuery, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../../api/client";
-import { requestJson } from "../../api/http";
+import { readToken, requestJson } from "../../api/http";
 import type { components } from "../../api/generated/schema";
 
 export type Observation = components["schemas"]["ObservationResponse"];
@@ -28,6 +30,7 @@ export interface ObservationUpdate {
 }
 export interface Media {
   id: number;
+  duration_sec?: number | null;
   stored_filename: string;
   content_type: string;
   size: number;
@@ -148,30 +151,50 @@ export interface ObservationSearchFilters {
   date_from?: string;
   /** 观察日期（北京时间）止，含当天，YYYY-MM-DD */
   date_to?: string;
+  /** 已采纳的观察指标编码 */
+  indicator_code?: string;
 }
 
+const OBSERVATION_PAGE_SIZE = 20;
+
 /** 把检索条件转成 GET /observations 的查询参数；空条件不发送。 */
-export function observationSearchParams(filters: ObservationSearchFilters) {
+export function observationSearchParams(
+  filters: ObservationSearchFilters,
+  offset = 0,
+) {
   return {
     ...(filters.child_id != null ? { child_id: filters.child_id } : {}),
     ...(filters.area_id != null ? { area_id: filters.area_id } : {}),
     ...(filters.status ? { status: filters.status } : {}),
     ...(filters.date_from ? { date_from: filters.date_from } : {}),
     ...(filters.date_to ? { date_to: filters.date_to } : {}),
+    ...(filters.indicator_code ? { indicator_code: filters.indicator_code } : {}),
+    limit: OBSERVATION_PAGE_SIZE,
+    offset,
   };
 }
 
 export function useObservationSearch(filters: ObservationSearchFilters) {
-  return useQuery({
+  const query = useInfiniteQuery({
     queryKey: [...queryKeys.observations, "search", filters],
-    queryFn: async () => {
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
       const { data, error } = await apiClient.GET("/observations", {
-        params: { query: observationSearchParams(filters) },
+        params: { query: observationSearchParams(filters, pageParam) },
       });
       if (error || !data) throw new Error("观察记录加载失败");
       return data;
     },
+    getNextPageParam: (lastPage, pages) => (
+      lastPage.length === OBSERVATION_PAGE_SIZE
+        ? pages.reduce((count, page) => count + page.length, 0)
+        : undefined
+    ),
   });
+  return {
+    ...query,
+    data: query.data?.pages.flat(),
+  };
 }
 
 export function useAllMedia() {
@@ -218,9 +241,9 @@ function updateObservationStatus(
 export function useGenerateNarrative(id: number) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
+    mutationFn: async (mode: "focused" | "explore" = "focused") => {
       const { data, error } = await apiClient.POST("/observations/{obs_id}/narrative", {
-        params: { path: { obs_id: id } },
+        params: { path: { obs_id: id }, query: { mode } },
       });
       if (error || !data) throw new CaptureError("这次没有整理成功，请重新试一次");
       return data as NarrativeGenerationResult;
@@ -275,13 +298,14 @@ export function useUpdateObservation(id: number) {
         queryClient.setQueryData(queryKeys.observations, context.previousList);
       }
     },
-    onSuccess: (saved) => {
+    onSuccess: async (saved) => {
       queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => (
         current ? { ...current, ...saved } : current
       ));
       queryClient.setQueryData<Observation[]>(queryKeys.observations, (current) => (
         current?.map((item) => item.id === id ? { ...item, ...saved } : item)
       ));
+      await queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
     },
   });
 }
@@ -300,6 +324,27 @@ export function useDeleteObservation(id: number) {
       queryClient.invalidateQueries({ queryKey: queryKeys.observations });
     },
   });
+}
+
+export function useReplaceObservationChildren(id: number) {
+  const queryClient = useQueryClient();
+  const [views, setViews] = useState<Record<number, SelectionState>>({});
+  const queue = useMemo(() => createSelectionQueue(
+    async (childIds) => {
+      const { data, error } = await apiClient.PUT("/observations/{obs_id}/children", {
+        params: { path: { obs_id: id } }, body: { child_ids: childIds },
+      });
+      if (error || !data) throw new Error("观察对象没有保存成功");
+    },
+    async () => {
+      // 只在一批选择完成后读取详情；下一步需要新的主体和上下文失效状态。
+      await queryClient.invalidateQueries({ queryKey: queryKeys.observation(id), refetchType: "all" }, { throwOnError: true });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.observations });
+    },
+    (state) => setViews((current) => ({ ...current, [id]: state })),
+  ), [id, queryClient]);
+  const state: SelectionState = views[id] ?? { isPending: false, isError: false };
+  return { ...state, mutate: queue.select, retry: queue.retry, flush: queue.flush };
 }
 
 export function useSuggestTags(id: number) {
@@ -321,9 +366,69 @@ export function useSuggestTags(id: number) {
   });
 }
 
-export function useDecideTag(id: number) {
+export interface AnalysisSuggestion {
+  observation_id: number;
+  analysis: string;
+  strategy: string;
+  is_mock: boolean;
+  engine: string;
+  notice: string;
+}
+
+export function useSuggestAnalysis(id: number) {
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await apiClient.POST("/observations/{obs_id}/suggest-analysis", {
+        params: { path: { obs_id: id } },
+      });
+      if (error || !data) throw new Error("AI 建议暂时没有生成成功，请再试一次");
+      return data as AnalysisSuggestion;
+    },
+  });
+}
+
+export interface PersonGroup {
+  label: string;
+  ref_indexes: number[];
+  clues: string[];
+}
+export interface ObservationPeople {
+  narrative: string;
+  refs: { start: number; end: number; token: string; group: boolean; clue: string }[];
+  people: PersonGroup[];
+  method: "aliases" | "rules" | "ai";
+  notice: string;
+}
+export interface PersonAssignment { ref_indexes: number[]; child_id: number }
+
+export function useObservationPeople(id: number, narrative: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["observation-people", id, narrative],
+    queryFn: () => requestJson<ObservationPeople>(`/observations/${id}/people`, {
+      method: "POST", fallbackMessage: "人物整理暂时没有完成",
+    }),
+    enabled: enabled && Boolean(narrative.trim()),
+    staleTime: Infinity,
+    retry: false,
+  });
+}
+
+export function useAssignObservationPeople(id: number) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationFn: (body: { narrative: string; assignments: PersonAssignment[] }) =>
+      requestJson<{ narrative: string; child_ids: number[] }>(`/observations/${id}/people/assign`, {
+        method: "POST", body: JSON.stringify(body), fallbackMessage: "姓名没有保存成功",
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) }),
+  });
+}
+
+export function useDecideTag(id: number) {
+  const queryClient = useQueryClient();
+  const pendingCount = useIsMutating({ mutationKey: ["tag-decisions", id] });
+  const mutation = useMutation({
+    mutationKey: ["tag-decisions", id],
     mutationFn: async ({ accepted, tagId }: { accepted: boolean; tagId: number }) => {
       const { data, error } = await apiClient.PATCH(
         "/observations/{obs_id}/tags/{tag_id}",
@@ -348,17 +453,20 @@ export function useDecideTag(id: number) {
             }
           : current
       ));
-      return { previous };
+      return { previous: previous?.tags.find((tag) => tag.id === tagId) };
     },
     onError: (_error, _variables, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(queryKeys.observation(id), context.previous);
+        queryClient.setQueryData<ObservationDetail>(queryKeys.observation(id), (current) => current ? { ...current, tags: current.tags.map((tag) => tag.id === context.previous?.id ? { ...tag, accepted: context.previous.accepted } : tag) } : current);
       }
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
+      if (queryClient.isMutating({ mutationKey: ["tag-decisions", id] }) === 1) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.observation(id) });
+      }
     },
   });
+  return { ...mutation, isPending: pendingCount > 0 };
 }
 
 export function useAddTeacherTag(id: number) {
@@ -413,17 +521,10 @@ export function useConfirmObservation(id: number) {
   });
 }
 
-interface CaptureProgress { mediaId?: number; observationId?: number }
+interface CaptureProgress { observationId?: number }
 interface CaptureInput {
   file: File;
   areaId: number;
-  /** 主幼儿。多人游戏时选第一个，落款和文件名用它 */
-  childId: number;
-  /**
-   * 同一条素材里出现的其他幼儿（不含 childId）。
-   * FEATURES.multiChildCapture 关闭时永远是空数组，行为与原来完全一致。
-   */
-  extraChildIds?: number[];
   progress: CaptureProgress;
   onUploadProgress: (percentage: number) => void;
 }
@@ -449,13 +550,19 @@ function uploadErrorMessage(status?: number) {
   return "上传失败，点这里重试";
 }
 
-function uploadFile(file: File, onProgress: (percentage: number) => void) {
+function uploadFile(
+  file: File,
+  observationId: number,
+  onProgress: (percentage: number) => void,
+) {
   return new Promise<number>((resolve, reject) => {
     const request = new XMLHttpRequest();
     const formData = new FormData();
     formData.append("file", file);
 
-    request.open("POST", "/api/uploads");
+    request.open("POST", `/api/uploads?observation_id=${observationId}`);
+    const token = readToken();
+    if (token) request.setRequestHeader("Authorization", `Bearer ${token}`);
     request.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
         onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
@@ -479,19 +586,12 @@ function uploadFile(file: File, onProgress: (percentage: number) => void) {
   });
 }
 
-async function submitCapture({ file, areaId, childId, extraChildIds = [], progress, onUploadProgress }: CaptureInput) {
-  if (!progress.mediaId) {
-    onUploadProgress(0);
-    progress.mediaId = await uploadFile(file, onUploadProgress);
-  } else {
-    onUploadProgress(100);
-  }
-
+async function submitCapture({ file, areaId, progress, onUploadProgress }: CaptureInput) {
   if (!progress.observationId) {
     let observationResult;
     try {
       observationResult = await apiClient.POST("/observations", {
-        body: { area_id: areaId, child_id: childId },
+        body: { area_id: areaId },
       });
     } catch {
       throw new CaptureError("记录没有建好，点这里重试");
@@ -503,31 +603,20 @@ async function submitCapture({ file, areaId, childId, extraChildIds = [], progre
   }
 
   try {
-    const attachResult = await apiClient.POST("/observations/{obs_id}/attach-media", {
-      params: {
-        path: { obs_id: progress.observationId },
-        query: { media_id: progress.mediaId },
-      },
-    });
-    if (attachResult.error) throw new CaptureError("素材还没关联好，点这里重试");
+    onUploadProgress(0);
+    await uploadFile(file, progress.observationId, onUploadProgress);
   } catch (error) {
-    if (error instanceof CaptureError) throw error;
-    throw new CaptureError("素材还没关联好，点这里重试");
-  }
-
-  // 多幼儿关联：主幼儿已写在 observation.child_id 上，其余的补一次关联请求。
-  // 这一步失败不回滚整条记录——素材已经存下来了，让老师之后在整理页补选，
-  // 比让他重新上传一遍视频代价小得多。
-  if (extraChildIds.length > 0) {
     try {
-      await requestJson<void>(`/observations/${progress.observationId}/children`, {
-        method: "PUT",
-        body: JSON.stringify({ child_ids: [childId, ...extraChildIds] }),
-        fallbackMessage: "其他幼儿没有关联上，可以在整理页再补选",
+      await requestJson<void>(`/observations/${progress.observationId}`, {
+        method: "DELETE",
+        fallbackMessage: "空记录清理失败",
       });
     } catch {
-      throw new CaptureError("其他幼儿没有关联上，可以在整理页再补选");
+      // 上传失败仍保留原错误；服务端只会留下无素材草稿，不会暴露他人数据。
     }
+    progress.observationId = undefined;
+    if (error instanceof CaptureError) throw error;
+    throw new CaptureError("上传失败，点这里重试");
   }
 
   return { observationId: progress.observationId };

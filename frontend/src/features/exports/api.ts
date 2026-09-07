@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { requestBlob, requestJson } from "../../api/http";
 import { FEATURES } from "../../config/features";
 
-export type ExportFormat = "docx" | "pdf" | "md";
+export type ExportFormat = "docx" | "pdf";
 
 export interface ExportFormatOption {
   format: ExportFormat;
@@ -18,7 +18,7 @@ export interface ExportFormatOption {
   enabled: boolean;
 }
 
-export const EXPORT_FORMATS: ExportFormatOption[] = [
+export const EXPORT_FORMATS: [ExportFormatOption, ExportFormatOption] = [
   {
     format: "docx",
     name: "Word 文档",
@@ -36,15 +36,6 @@ export const EXPORT_FORMATS: ExportFormatOption[] = [
     label: "PDF",
     extension: ".pdf",
     enabled: FEATURES.exportPdf,
-  },
-  {
-    format: "md",
-    name: "Markdown",
-    description: "纯文本，方便二次整理",
-    color: "bg-[#60716b]",
-    label: "MD",
-    extension: ".md",
-    enabled: FEATURES.exportMarkdown,
   },
 ];
 

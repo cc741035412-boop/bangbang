@@ -1,142 +1,57 @@
-import { ChevronDown, UserRound } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import type { ObservationPeople, PersonAssignment, PersonGroup } from "../features/observations/api";
 
-import { applyChildNames, distinctPersonRefs, findPersonRefs, isGroupRef } from "../lib/substitute-children";
-
-/**
- * 白描"代入幼儿名"面板。
- *
- * - 记录只有一个幼儿 → 一键把白描里的非群体泛称（女童/男童/幼儿…）代入该幼儿姓名；
- * - 多个幼儿 → 每个非群体泛称由老师指认到某个幼儿，逐个代入；
- * - 群体泛称（孩子们/小朋友们…）默认"可跳过"，不强迫指认到单个名字；
- * - 允许只代入一部分：未指认的保留原泛称，不影响继续生成指标。
- * 代入发生在本地（姓名从不发给模型），替换后的文本仍可直接编辑。
- */
-export function ChildNameInserter({
-  text,
-  children,
-  selectedChildId,
-  onApply,
-}: {
-  text: string;
+/** 按人物对应姓名；整组引用一次保存，群体称呼保持原文。 */
+export function ChildNameInserter({ people, children, loading, error, onRetry, onApply }: {
+  people?: ObservationPeople;
   children: { id: number; name: string }[];
-  selectedChildId?: number | null;
-  onApply: (newText: string) => void;
+  loading: boolean;
+  error: boolean;
+  onRetry: () => void;
+  onApply: (assignments: PersonAssignment[], narrative: string) => Promise<void>;
 }) {
-  const refs = useMemo(() => findPersonRefs(text), [text]);
-  const [open, setOpen] = useState(false);
-  const [assignments, setAssignments] = useState<Record<number, string>>({});
-
-  if (refs.length === 0) return null;
-
-  const selectedChild = children.find((c) => c.id === selectedChildId) ?? null;
-  const distinct = distinctPersonRefs(text);
-  const groupCount = refs.filter((r) => isGroupRef(text, r)).length;
-  const individualRefs = refs.map((r, i) => ({ ref: r, i })).filter((x) => !isGroupRef(text, x.ref));
-  const hasAnyAssignment = individualRefs.some(({ i }) => assignments[i]);
-  const refContext = (i: number) => {
-    const start = Math.max(0, refs[i].index - 16);
-    return text.slice(start, refs[i].index + refs[i].length + 8);
-  };
-
-  // 代入时跳过群体泛称（含"几名孩子/一群孩子/三四个孩子"这类带数量词的），避免被硬改成一个名字。
-  const skipGroups = (map: (refIndex: number) => string) =>
-    refs.map((ref, i) => (isGroupRef(text, ref) ? "" : map(i)));
-
-  function applyAll() {
-    onApply(applyChildNames(text, refs, skipGroups(() => selectedChild?.name ?? "")));
+  const [splitGroups, setSplitGroups] = useState<number[]>([]);
+  const [assignments, setAssignments] = useState<Record<number, number>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  if (loading) return <p className="mt-4 text-sm text-brand" role="status">正在根据白描整理人物线索…</p>;
+  if (error) return <div className="mt-4 text-sm text-red-700"><p>人物整理暂未完成，白描仍可编辑。</p><button className="min-h-11 text-base font-bold underline" onClick={onRetry} type="button">重新整理人物</button></div>;
+  if (!people) return null;
+  if (!people.people.length) return <p className="mt-4 text-sm text-ink-muted">没有待对应的个人称呼。请核对白描中的姓名及上方观察对象。</p>;
+  const groups: PersonGroup[] = people.people.flatMap((group, i) => splitGroups.includes(i)
+    ? group.ref_indexes.map((index) => ({ label: group.label, ref_indexes: [index], clues: [people.refs[index]?.clue ?? "请核对原文"] })) : [group]);
+  const chosen = groups.filter((group) => assignments[(group.ref_indexes[0] ?? -1)]);
+  async function apply() {
+    if (!people) return;
+    setSaving(true); setSaveError("");
+    try {
+      await onApply(chosen.map((group) => ({ ref_indexes: group.ref_indexes, child_id: assignments[(group.ref_indexes[0] ?? -1)] ?? 0 })), people.narrative);
+    } catch (err) { setSaveError(err instanceof Error ? err.message : "姓名未保存，请重试"); }
+    finally { setSaving(false); }
   }
-
-  function applyMapped() {
-    onApply(applyChildNames(text, refs, skipGroups((i) => assignments[i])));
-  }
-
   return (
-    <div className="mt-3 rounded-2xl border border-[#cfe4d9] bg-[#f2f8f4] px-4 py-3">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 text-left text-sm font-semibold text-brand-deep"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <UserRound size={16} />
-        {selectedChild
-          ? `白描里有 ${refs.length} 处写的是泛称，可代入幼儿名「${selectedChild.name}」`
-          : `白描里有 ${refs.length} 处是泛称，可指认到幼儿`}
-        <ChevronDown className={`ml-auto transition-transform ${open ? "rotate-180" : ""}`} size={16} />
-      </button>
-
-      {open && (
-        <div className="mt-3 space-y-2">
-          <p className="text-xs leading-5 text-ink-muted">
-            检测到的人物泛称（{refs.length} 处）：{distinct.join("、")}
-            {groupCount > 0 && `（其中 ${groupCount} 处为群体，可跳过）`}。
-            姓名只在本地代入，不会发送给 AI。
-          </p>
-
-          {selectedChild && groupCount === 0 && (
-            <button
-              type="button"
-              className="w-full min-h-10 rounded-xl bg-brand font-bold text-white disabled:bg-[#c2cec9]"
-              onClick={applyAll}
-            >
-              一键代入「{selectedChild.name}」
-            </button>
-          )}
-
-          {selectedChild && groupCount > 0 && (
-            <p className="rounded-xl bg-[#eef5f0] px-3 py-2 text-xs leading-5 text-ink-muted">
-              这段提到了多个孩子，为避免把不同的人写成同一个名字，请逐个指认下面的个体（群体已可跳过）。
-            </p>
-          )}
-
-          {!selectedChild && (
-            <p className="text-xs text-amber-700">请先在上方选择这条记录关于哪位幼儿，再逐处指认。</p>
-          )}
-
-          <ul className="space-y-1.5">
-            {refs.map((ref, i) => {
-              const isGroup = isGroupRef(text, ref);
-              return (
-                <li key={i} className="flex items-center gap-2 text-sm">
-                  <span className="min-w-0 flex-1 truncate text-ink-muted">
-                    第 {i + 1} 处「{ref.token}」…{refContext(i)}
-                  </span>
-                  {isGroup ? (
-                    <span className="shrink-0 rounded-lg bg-[#e7efe9] px-2 py-1 text-xs text-ink-muted">群体 · 可跳过</span>
-                  ) : (
-                    <select
-                      aria-label={`第 ${i + 1} 处泛称指认幼儿`}
-                      className="max-w-[9rem] shrink-0 rounded-xl border border-[#dfdcd4] bg-white px-2 py-1.5 text-sm outline-none focus:border-brand"
-                      onChange={(e) => setAssignments((a) => ({ ...a, [i]: e.target.value }))}
-                      value={assignments[i] ?? ""}
-                    >
-                      <option value="">选择幼儿</option>
-                      {children.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-                    </select>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-
-          {selectedChild && individualRefs.length > 0 && (
-            <p className="text-xs text-ink-muted">
-              已选 {Object.keys(assignments).filter((k) => assignments[Number(k)]).length} 处，可继续生成指标；未选的保留原泛称。
-            </p>
-          )}
-
-          {selectedChild && refs.length > 1 && (
-            <button
-              type="button"
-              className="w-full min-h-10 rounded-xl border border-brand font-bold text-brand disabled:bg-[#c2cec9] disabled:text-stone-400"
-              disabled={!hasAnyAssignment}
-              onClick={applyMapped}
-            >
-              应用上面的逐处指认
-            </button>
-          )}
-        </div>
-      )}
-    </div>
+    <section className="mt-4 rounded-2xl border border-brand/25 bg-brand-soft p-3" aria-label="按人物对应姓名">
+      <h3 className="text-base font-bold text-brand-deep">白描中可能有 {groups.length} 位待对应的幼儿</h3>
+      <p className="mt-1 text-sm leading-6 text-ink-muted">对照衣着、行为选姓名，同一人物只选一次。</p>
+      <p className="mt-1 text-sm leading-6 text-ink-muted">{people.notice}</p>
+      <div className="mt-3 space-y-3">
+        {groups.map((group, i) => (
+          <div className="rounded-xl bg-white p-3" key={group.ref_indexes.join(",")}>
+            <label className="text-base font-bold" htmlFor={`person-${i}`}>人物 {i + 1}</label>
+            <p className="mt-1 text-sm leading-6 text-ink-muted">{group.clues[0]}</p>
+            {group.clues.length > 1 && <details><summary className="min-h-11 cursor-pointer py-2 text-sm text-brand">更多行为线索</summary>{group.clues.slice(1).map((clue) => <p className="mb-2 text-sm leading-6" key={clue}>{clue}</p>)}</details>}
+            <select className="mt-2 min-h-12 w-full rounded-xl border border-stone-300 bg-white px-3 text-base" id={`person-${i}`} disabled={saving} value={assignments[(group.ref_indexes[0] ?? -1)] ?? ""} onChange={(e) => setAssignments((current) => ({ ...current, [(group.ref_indexes[0] ?? -1)]: Number(e.target.value) }))}>
+              <option value="">选择姓名（暂不确定可留空）</option>
+              {children.map((child) => <option key={child.id} value={child.id}>{child.name}</option>)}
+            </select>
+            <p className="mt-1 text-sm text-ink-muted">将一起代入 {group.ref_indexes.length} 处称呼</p>
+          </div>
+        ))}
+      </div>
+      <details className="mt-2"><summary className="min-h-11 cursor-pointer py-2 text-sm text-brand">分组不对？拆开核对</summary><p className="text-sm leading-6 text-ink-muted">同一个人被分成两组时，两组选择同一姓名即可。不同人被合并时，可拆开。</p>{people.people.map((group, i) => group.ref_indexes.length > 1 && !splitGroups.includes(i) && <button type="button" disabled={saving} className="mr-2 min-h-11 text-base font-bold text-brand" key={i} onClick={() => { setSplitGroups((current) => [...current, i]); setAssignments((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !group.ref_indexes.includes(Number(key))))); }}>拆开{group.label}</button>)}</details>
+      <button className="mt-2 min-h-12 w-full rounded-xl bg-brand text-base font-bold text-white disabled:opacity-50" type="button" disabled={!chosen.length || saving} onClick={() => void apply()}>{saving ? "正在代入并保存…" : "确认人物并代入姓名"}</button>
+      {people.refs.some((ref) => ref.group) && <p className="mt-2 text-sm text-ink-muted">“孩子们”等群体称呼会保留。</p>}
+      {saveError && <p className="mt-2 text-sm text-red-700" role="alert">{saveError}</p>}
+    </section>
   );
 }

@@ -9,3 +9,4 @@ sqlmodel==0.0.34
 uvicorn[standard]==0.39.0
 imageio-ffmpeg==0.6.0
 pillow==11.3.0
+pillow-heif==1.1.1

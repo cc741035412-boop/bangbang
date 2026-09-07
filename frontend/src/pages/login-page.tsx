@@ -54,11 +54,16 @@ export function LoginPage() {
 
   function requestCode() {
     if (!isPhone(phone) || cooldown > 0 || sendCode.isPending) return;
+    login.reset();
+    register.reset();
     sendCode.mutate(phone, { onSuccess: startCooldown });
   }
 
   function submit() {
     if (!canSubmit) return;
+    login.reset();
+    register.reset();
+    sendCode.reset();
     const done = { onSuccess: () => navigate(backTo, { replace: true }) };
     if (isRegister) {
       register.mutate(
@@ -84,6 +89,15 @@ export function LoginPage() {
             ? "填好这几项，生成的记录会直接带上你的落款。"
             : "拍完就传，记录当天写完。"}
         </p>
+
+        <section
+          className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900"
+          aria-label="公开体验说明"
+        >
+          <strong className="block">仅供模拟体验</strong>
+          请使用虚构手机号、姓名、园所和幼儿资料，禁止上传真实幼儿影像或园所内部材料。
+          点击“获取验证码”后，体验验证码为 123456。
+        </section>
 
         <form
           className="mt-9 space-y-4"
@@ -155,6 +169,12 @@ export function LoginPage() {
             </>
           )}
 
+          {sendCode.isSuccess && !error && (
+            <p className="text-sm text-brand" role="status">
+              验证码已获取，5 分钟内有效。体验验证码为 123456。
+            </p>
+          )}
+
           {error && (
             <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
               {error}
@@ -190,7 +210,7 @@ export function LoginPage() {
             type="checkbox"
           />
           <span>
-            我已阅读并同意《用户协议》和《隐私政策》。幼儿影像仅用于生成本园观察记录。
+            我已阅读并同意体验规则：只提交虚构资料；AI 输出需要由教师核对，不作为专业结论。
           </span>
         </label>
       </main>

@@ -1,6 +1,6 @@
-import { Image as ImageIcon, Plus, RotateCcw } from "lucide-react";
+import { Blocks, Image as ImageIcon, RotateCcw } from "lucide-react";
 import { useMemo } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 
 import { HomeTabBar } from "../components/home-tab-bar";
 import { MaterialCard } from "../components/material-card";
@@ -9,13 +9,9 @@ import { UploadSheet } from "../components/upload-sheet";
 import { useTodayMediaData } from "../features/observations/api";
 import { compareTimestampsDescending, formatKindergartenToday, isKindergartenToday } from "../lib/date-time";
 
-interface SuccessState { captureDuration?: number }
-
 export function TodayMediaPage() {
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const successState = location.state as SuccessState | null;
   const { observations, areas, children, media } = useTodayMediaData();
   const areaNames = useMemo(() => new Map((areas.data ?? []).map((area) => [area.id, area.name])), [areas.data]);
   const childNames = useMemo(() => new Map((children.data ?? []).map((child) => [child.id, child.name])), [children.data]);
@@ -41,15 +37,13 @@ export function TodayMediaPage() {
           <p className="mt-2 text-base text-[#8b9994]">{formatKindergartenToday()} · 今天拍的都在这里</p>
         </header>
 
-        <button className="mt-5 flex min-h-16 w-full items-center justify-center gap-2 rounded-2xl bg-brand text-xl font-bold text-white shadow-[0_10px_25px_rgba(49,116,90,0.20)]" onClick={() => setSearchParams({ upload: "1" })} type="button">
-          <Plus aria-hidden size={25} /> 上传素材
+        <button aria-label="上传素材" className="mt-5 flex min-h-16 w-full items-center justify-center gap-3 rounded-2xl bg-brand text-xl font-bold text-white shadow-[0_10px_25px_rgba(49,116,90,0.20)]" onClick={() => setSearchParams({ upload: "1" })} type="button">
+          <Blocks aria-hidden className="shrink-0 text-brand-soft" size={24} strokeWidth={2} />
+          <span className="text-left">
+            上传素材
+            <span className="block text-xs font-medium text-white/85">选择手机里拍好的照片或视频</span>
+          </span>
         </button>
-
-        {successState?.captureDuration != null && (
-          <button className="mt-4 w-full rounded-xl bg-brand-soft px-4 py-3 text-left text-sm text-brand-deep" onClick={() => navigate(location.pathname, { replace: true, state: null })} type="button">
-            已上传，稍后可以继续整理 · 用时 {Math.round(successState.captureDuration)} 秒
-          </button>
-        )}
 
         <div className="mt-5">
           {isLoading && <p className="py-20 text-center text-sm text-ink-muted">正在看看今天的素材…</p>}
@@ -67,7 +61,7 @@ export function TodayMediaPage() {
         </div>
       </div>
       <HomeTabBar active="today" />
-      {uploadOpen && <UploadSheet onClose={closeUpload} onUploaded={(duration) => navigate("/", { replace: true, state: { captureDuration: duration } })} />}
+      {uploadOpen && <UploadSheet onClose={closeUpload} onUploaded={(observationId) => navigate(`/observations/${observationId}/review`, { replace: true })} />}
     </MobilePage>
   );
 }

@@ -1,20 +1,27 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryObserver, InfiniteQueryObserver } from "@tanstack/react-query";
+import type { Observation } from "../features/observations/api";
 import { MemoryRouter } from "react-router";
 
 import {
   useAllMedia,
   useAreas,
   useChildren,
+  useIndicators,
   useObservationSearch,
 } from "../features/observations/api";
 import { RecordSearchPage } from "./record-search-page";
 
-const query = <T,>(data: T) => ({
-  data,
-  isLoading: false,
-  isError: false,
-  refetch: vi.fn(),
-});
+const query = <T,>(data: T) => new QueryObserver(new QueryClient(), {
+  queryKey: ["test-query"], queryFn: async () => data, initialData: data,
+}).getCurrentResult();
+const searchQuery = (data: Observation[]) => {
+  const result = new InfiniteQueryObserver(new QueryClient(), {
+    queryKey: ["test-search"], queryFn: async () => data, initialPageParam: 0,
+    getNextPageParam: () => undefined, initialData: { pages: [data], pageParams: [0] },
+  }).getCurrentResult();
+  return { ...result, data: result.data?.pages.flat() };
+};
 
 const records = [
   {
@@ -45,6 +52,7 @@ vi.mock("../features/observations/api", async (importOriginal) => {
     useAreas: vi.fn(),
     useChildren: vi.fn(),
     useAllMedia: vi.fn(),
+    useIndicators: vi.fn(),
   };
 });
 
@@ -57,7 +65,7 @@ describe("record search page", () => {
   afterAll(() => vi.useRealTimers());
 
   beforeEach(() => {
-    vi.mocked(useObservationSearch).mockReturnValue(query(records));
+    vi.mocked(useObservationSearch).mockReturnValue(searchQuery(records));
     vi.mocked(useAreas).mockReturnValue(query([
       { id: 1, code: "blocks", name: "建构区" },
       { id: 2, code: "role", name: "角色区" },
@@ -66,11 +74,14 @@ describe("record search page", () => {
       { id: 1, name: "幼儿A", classroom_id: 1 },
     ]));
     vi.mocked(useAllMedia).mockReturnValue(query([]));
+    vi.mocked(useIndicators).mockReturnValue(query([
+      { indicator_code: "1.1", indicator_name: "身体行为参与度", dimension: "身体参与", level: 2, level_label: "中阶", description: "", has_quant_rule: false },
+    ]));
   });
 
   it("lists the records returned by the current filters and groups by date", () => {
     render(<MemoryRouter><RecordSearchPage /></MemoryRouter>);
-    expect(screen.getByText("共 2 条记录 · 最新的在最上面")).toBeInTheDocument();
+    expect(screen.getByText("已加载 2 条记录 · 最新的在最上面")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开建构区记录" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开角色区记录" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "8月27日 · 今天" })).toBeInTheDocument();
@@ -161,7 +172,7 @@ describe("record search page", () => {
   });
 
   it("shows an empty state when nothing matches", () => {
-    vi.mocked(useObservationSearch).mockReturnValue(query([]));
+    vi.mocked(useObservationSearch).mockReturnValue(searchQuery([]));
     render(<MemoryRouter><RecordSearchPage /></MemoryRouter>);
     expect(screen.getByText("没有找到符合条件的记录")).toBeInTheDocument();
   });

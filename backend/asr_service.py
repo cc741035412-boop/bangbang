@@ -60,16 +60,61 @@ def _mock(asr_disabled_reason: str) -> dict:
     }
 
 
-def transcribe_video(video_path) -> dict:
+def _audio_is_silent(wav_bytes: bytes, peak_threshold: int = 150) -> bool:
+    """判断 16 位 PCM WAV 是否几乎无声（音量峰值低于阈值）。
+
+    只用于"跳过语音识别"这一降级判断：返回 True 表示基本没声音，不值得调云端 ASR。
+    解析失败或格式异常时返回 False（保守：当作有声音，不跳过），避免误伤有对话的视频。
+    """
+    try:
+        if len(wav_bytes) < 44:
+            return False
+        data_start = wav_bytes.find(b"data")
+        if data_start < 0:
+            return False
+        payload = wav_bytes[data_start + 8:]  # 'data' + 4 字节块长
+        try:
+            import audioop
+            max_amp = audioop.max(payload, 2)  # 16 位 PCM 峰值，C 实现，快
+        except Exception:
+            # 退化：逐样本取峰值（较慢，仅用于无 audioop 的极端情况）
+            max_amp = 0
+            for i in range(0, len(payload) - 1, 2):
+                val = payload[i] | (payload[i + 1] << 8)
+                if val >= 0x8000:
+                    val -= 0x10000
+                if val < 0:
+                    val = -val
+                if val > max_amp:
+                    max_amp = val
+        return max_amp < peak_threshold
+    except Exception:
+        return False
+
+
+def transcribe_video(video_path, duration_sec=None) -> dict:
     """对一条视频做语音转写。任何异常都降级为 mock，不抛错。
-    ASR_MODE=mock（未接入）时直接返回 mock，不调用云端。
+
+    降级/跳过规则（为了省掉不必要的云端往返）：
+      - ASR_MODE != doubao 或未配置 → mock（未接入）。
+      - 短视频（duration_sec < ASR_MIN_DURATION_SEC）→ mock（太短，降级）。
+      - 无法抽取音频 / 没有声音轨 → mock。
+      - 几乎无声（音量峰值过低）→ mock（跳过）。
     """
     if config.ASR_MODE != "doubao" or not config.ASR_API_KEY:
         return _mock("ASR_MODE=mock，未接入真实语音识别")
 
+    if duration_sec is not None and duration_sec < config.ASR_MIN_DURATION_SEC:
+        return _mock(
+            f"视频仅 {duration_sec:.0f} 秒，不足 {config.ASR_MIN_DURATION_SEC:.0f} 秒，已降级跳过语音识别",
+        )
+
     wav = _extract_audio_bytes(video_path)
     if not wav:
         return _mock("无法从视频抽取音频，或没有声音轨")
+
+    if _audio_is_silent(wav):
+        return _mock("视频几乎无声，已跳过语音识别")
 
     started_at = utc_now()
     body = {

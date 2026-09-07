@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { ObservationDetailPage } from "./observation-detail-page";
 
 const mocks = vi.hoisted(() => ({
+  incomplete: false,
   exportFile: vi.fn(),
   deleteObservation: vi.fn(),
 }));
@@ -45,7 +46,7 @@ vi.mock("../features/observations/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../features/observations/api")>();
   return {
     ...actual,
-    useObservation: () => ({ data: record, isLoading: false, isError: false }),
+    useObservation: () => ({ data: { ...record, analysis: mocks.incomplete ? "" : record.analysis }, isLoading: false, isError: false }),
     useIndicators: () => ({ data: [{ indicator_code: "PHY-01", dimension: "身体参与" }] }),
     useDeleteObservation: () => ({ mutate: mocks.deleteObservation, isPending: false }),
   };
@@ -66,6 +67,7 @@ function renderPage() {
 
 describe("ObservationDetailPage", () => {
   beforeEach(() => {
+    mocks.incomplete = false;
     mocks.exportFile.mockReset();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:word") });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
@@ -73,6 +75,13 @@ describe("ObservationDetailPage", () => {
   });
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("旧记录缺分析时显示补全入口而非导出", () => {
+    mocks.incomplete = true;
+    renderPage();
+    expect(screen.getByRole("link", { name: "补全分析与策略" })).toHaveAttribute("href", "/observations/12/review?step=writing");
+    expect(screen.queryByRole("button", { name: "导出" })).not.toBeInTheDocument();
+  });
 
   it("renders the complete draft with accepted indicators and one overall analysis", () => {
     renderPage();
@@ -94,7 +103,6 @@ describe("ObservationDetailPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "导出" }));
     expect(screen.getByRole("dialog", { name: "导出格式" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /PDF/ })).toBeEnabled();
-    expect(screen.getByRole("button", { name: /Markdown/ })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "确认导出" }));
 
     expect(await screen.findByText("导出成功！")).toBeInTheDocument();

@@ -1,0 +1,43 @@
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      BANGBANG_DB_PATH: /data/bangbang.db
+      BANGBANG_UPLOAD_DIR: /data/uploads
+      BANGBANG_ENV: demo
+      BANGBANG_ALLOWED_HOSTS: ${PUBLIC_HOST:?请设置 PUBLIC_HOST}
+      BANGBANG_AI_MODE: mock
+      BANGBANG_VISION_MODE: mock
+      BANGBANG_ASR_MODE: mock
+      SMS_PROVIDER: mock
+      SMS_MOCK_CODE: ${SMS_MOCK_CODE:?请设置 SMS_MOCK_CODE}
+    volumes:
+      - bangbang-public-data:/data
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?请设置 PUBLIC_HOST}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.public:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  bangbang-public-data:
+  caddy-data:
+  caddy-config:

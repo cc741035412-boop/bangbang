@@ -21,3 +21,12 @@ createRoot(root).render(
     </AppProviders>
   </StrictMode>,
 );
+
+// PWA：仅生产环境注册离线壳 Service Worker，开发环境交给 Vite HMR，不干预。
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // 注册失败不阻断使用（例如不支持 SW 的浏览器或受限网络）。
+    });
+  });
+}

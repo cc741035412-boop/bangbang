@@ -39,7 +39,7 @@
 不重建数据库。请在确认后再执行：
 
 ```bash
-cd /Users/mac/bangbang/backend
+cd backend
 cp bangbang.db "bangbang.db.bak-$(date +%Y%m%d)"   # 先备份
 python migrate_observation_search.py               # 用项目环境执行（.venv/bin/python）
 # 预期输出：✅ 索引 ix_observation_observed_at 已就绪（observation.observed_at）

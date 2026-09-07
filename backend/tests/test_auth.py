@@ -110,6 +110,7 @@ class AuthFlowTest(unittest.TestCase):
         registered = self.register("13800000009")
         token = registered["access_token"]
         classroom_id = registered["account"]["classroom_id"]
+        teacher_id = registered["account"]["teacher_id"]
         now = utc_now()
         with Session(self.engine) as session:
             area = Area(code="construction", name="建构区")
@@ -121,6 +122,7 @@ class AuthFlowTest(unittest.TestCase):
                 child_id=child.id,
                 area_id=area.id,
                 classroom_id=classroom_id,
+                observer_id=teacher_id,
                 age_group="middle",
                 status="confirmed",
                 observed_at=now,
@@ -129,6 +131,7 @@ class AuthFlowTest(unittest.TestCase):
                 child_id=child.id,
                 area_id=area.id,
                 classroom_id=classroom_id,
+                observer_id=teacher_id,
                 age_group="middle",
                 status="uploaded",
                 observed_at=now - timedelta(days=1),
@@ -294,15 +297,14 @@ class AuthFlowTest(unittest.TestCase):
         self.assertIn("本班幼儿B", names)
         self.assertNotIn("别班幼儿C", names, "列表不应包含其它班级的幼儿")
 
-    def test_list_children_anonymous_returns_all(self):
-        """无登录态（demo 脚本兼容）返回全部，且不应 500。"""
+    def test_list_children_requires_authentication(self):
+        """公开环境不能匿名枚举幼儿。"""
         with Session(self.engine) as session:
             area = Area(code="construction", name="建构区")
             session.add(area)
             session.commit()
         resp = self.client.get("/children")
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertIsInstance(resp.json(), list)
+        self.assertEqual(resp.status_code, 401, resp.text)
 
     def test_delete_observation_removes_record_and_dependents(self):
         """删除观察记录应整条移除（204），并清掉其关联的指标/AI 审计。"""
@@ -481,6 +483,7 @@ class AuthFlowTest(unittest.TestCase):
                 age_group="middle",
                 status="confirmed",
                 narrative="幼儿A将积木放在底板上。",
+                analysis="能够摆放积木", strategy="提供更多积木",
             )
             session.add(observation)
             session.flush()
@@ -496,7 +499,7 @@ class AuthFlowTest(unittest.TestCase):
         exported = self.client.get(
             f"/observations/{observation_id}/export",
             headers=headers,
-            params={"format": "md", "include_indicators": "true"},
+            params={"format": "pdf", "include_indicators": "true"},
         )
         self.assertEqual(exported.status_code, 200, exported.text)
         history = self.client.get("/exports/history", headers=headers)
@@ -505,7 +508,7 @@ class AuthFlowTest(unittest.TestCase):
         record = history.json()[0]
         self.assertEqual(record["observation_id"], observation_id)
         self.assertEqual(record["scope"], "single")
-        self.assertEqual(record["format"], "md")
+        self.assertEqual(record["format"], "pdf")
         self.assertEqual(record["child_name"], "幼儿A")
         self.assertGreater(record["size"], 0)
         self.assertIsNone(record["download_url"])
@@ -611,13 +614,6 @@ class AuthFlowTest(unittest.TestCase):
             session.commit()
             session.refresh(area)
             area_id = area.id
-        uploaded = self.client.post(
-            "/uploads",
-            files={"file": ("mock.jpg", b"mock-image", "image/jpeg")},
-        )
-        self.assertEqual(uploaded.status_code, 201, uploaded.text)
-        media_id = uploaded.json()["id"]
-        stored_name = uploaded.json()["stored_filename"]
         observation = self.client.post(
             "/observations",
             headers=headers,
@@ -625,8 +621,18 @@ class AuthFlowTest(unittest.TestCase):
         )
         self.assertEqual(observation.status_code, 201, observation.text)
         observation_id = observation.json()["id"]
+        uploaded = self.client.post(
+            "/uploads",
+            headers=headers,
+            params={"observation_id": observation_id},
+            files={"file": ("mock.jpg", b"mock-image", "image/jpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        media_id = uploaded.json()["id"]
+        stored_name = uploaded.json()["stored_filename"]
         attached = self.client.post(
-            f"/observations/{observation_id}/attach-media?media_id={media_id}"
+            f"/observations/{observation_id}/attach-media?media_id={media_id}",
+            headers=headers,
         )
         self.assertEqual(attached.status_code, 200, attached.text)
         self.assertTrue((main.UPLOAD_DIR / stored_name).exists())
@@ -667,6 +673,23 @@ class AuthFlowTest(unittest.TestCase):
             response = self.client.post("/auth/code", json={"phone": "13800000006"})
         self.assertEqual(response.status_code, 503)
         self.assertIn("短信服务尚未配置", response.json()["detail"])
+
+    def test_demo_mode_allows_mock_sms_and_uses_secure_cookie(self):
+        with patch.object(main, "RUNTIME_ENV", "demo"):
+            sent = self.client.post("/auth/code", json={"phone": "13800000015"})
+            self.assertEqual(sent.status_code, 200, sent.text)
+            registered = self.client.post(
+                "/auth/register",
+                json={
+                    "phone": "13800000015",
+                    "code": "123456",
+                    "name": "演示教师",
+                    "kindergarten_name": "演示幼儿园",
+                    "classroom_name": "中一班",
+                },
+            )
+        self.assertEqual(registered.status_code, 200, registered.text)
+        self.assertIn("Secure", registered.headers["set-cookie"])
 
     def test_login_requires_existing_account(self):
         response = self.client.post(

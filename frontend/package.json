@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "lint": "eslint .",
     "test": "vitest run",
     "build": "npm run typecheck && vite build",
+    "validate:build": "node scripts/validate-build.mjs",
+    "build:check": "npm run build && npm run validate:build",
     "preview": "vite preview",
     "api:generate": "openapi-typescript http://127.0.0.1:8001/openapi.json -o src/api/generated/schema.d.ts"
   },

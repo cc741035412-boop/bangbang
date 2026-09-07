@@ -140,7 +140,7 @@ frontend/
 
 ```bash
 npm run dev          # 启动开发服务器
-npm run typecheck    # tsc --noEmit
+npm run typecheck    # tsc -b，检查 app 与 node 子项目
 npm run lint         # ESLint
 npm run test         # Vitest 单次运行
 npm run build        # 类型检查后构建
@@ -179,3 +179,12 @@ PWA 体验版至少具备：
 - 视频缩略图和时长探测在目标 Linux 环境可用，失败时页面正常降级。
 - 执行 `npm run typecheck`、`npm run lint`、`npm run test`、`npm run build` 和核心端到端流程。
 - 部署产物、Source Map、日志和错误提示不包含手机号、幼儿姓名、教师正文、文件路径、密钥或 token。
+
+类型检查必须遍历 tsconfig 的 references；禁止只检查没有源文件的根配置。测试夹具也纳入类型检查，数组取值需处理可能为空的情况。
+
+## 幼儿选择响应规则
+
+- 主观察幼儿单选、其他幼儿多选分别展示，不用颜色深浅作为唯一角色标记。
+- 点击立即反馈，不因后台保存锁住整排名单。连续选择合并成最新状态、请求串行执行，旧响应不得覆盖新选择。
+- 保存失败保留教师的选择并提供重试；生成白描、推荐指标前必须确认最新选择已持久保存。
+- `features/observations/selection-queue.ts` 管理连续选择保存，不缓存幼儿媒体；使用延迟及失败请求覆盖回归测试。

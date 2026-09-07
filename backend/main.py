@@ -18,6 +18,8 @@ from typing import Optional, List, Dict, Literal
 from urllib.parse import quote
 import base64
 import hashlib
+import person_service
+import json
 import re
 import secrets
 import shutil
@@ -28,6 +30,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header, Req
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_
 from sqlmodel import Session, select
@@ -45,17 +48,16 @@ from config import (
     RUNTIME_ENV,
     SMS_PROVIDER,
     SMS_MOCK_CODE,
+    ALLOWED_HOSTS,
 )
 from time_utils import utc_now
 from export_service import (
     DOCX_MEDIA_TYPE,
-    MARKDOWN_MEDIA_TYPE,
     PDF_MEDIA_TYPE,
     ExportChild,
     ExportIndicator,
     ExportObservation,
     build_observation_document,
-    build_observation_markdown,
     build_observation_pdf,
     child_names,
     kindergarten_datetime,
@@ -69,6 +71,18 @@ app = FastAPI(
     version="0.2",
     description="幼儿园教师素材沉淀与观察记录生成。工作流 B 支持 mock / DeepSeek 切换。",
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    if request.url.path.startswith(("/media", "/observations", "/exports", "/metrics")):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -134,6 +148,18 @@ class ObservationUpdate(BaseModel):
     strategy: Optional[str] = None
     location: Optional[str] = None
     background_note: Optional[str] = None
+
+
+class PersonAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ref_indexes: List[int]
+    child_id: int
+
+
+class PeopleAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    narrative: str
+    assignments: List[PersonAssignment]
 
 
 class ObservationChildrenUpdate(BaseModel):
@@ -369,7 +395,7 @@ class ExportHistoryResponse(BaseModel):
     id: int
     observation_id: Optional[int] = None
     scope: Literal["single", "monthly"]
-    format: Literal["docx", "pdf", "md"]
+    format: Literal["docx", "pdf"]
     file_name: str
     size: int
     child_name: Optional[str] = None
@@ -396,7 +422,20 @@ class NarrativeGenerationResponse(BaseModel):
     notice: str
 
 
+class AnalysisSuggestionResponse(BaseModel):
+    observation_id: int
+    analysis: str
+    strategy: str
+    is_mock: bool
+    engine: str
+    notice: str
+
+
 class ObservationDetailResponse(ObservationResponse):
+    observation_mode: Optional[Literal["focused", "explore"]] = None
+    narrative_context_changed: bool = False
+    suggestions_stale: bool = False
+    suggestions_ready: bool = False
     child_name: Optional[str] = None
     classroom_name: Optional[str] = None
     area_name: Optional[str] = None
@@ -409,8 +448,8 @@ class ObservationDetailResponse(ObservationResponse):
 ALLOWED_STATUS_TRANSITIONS = {
     "uploaded": {"processing"},
     "processing": {"ready_for_review", "failed"},
-    "ready_for_review": {"confirmed"},
-    "confirmed": set(),
+    "ready_for_review": {"confirmed", "processing"},
+    "confirmed": {"ready_for_review"},
     "failed": {"processing"},
 }
 
@@ -496,7 +535,10 @@ def classroom_child_names_for_anonymization(
         .where(Child.classroom_id == observation.classroom_id)
         .order_by(Child.id)
     ).all()
-    children.sort(key=lambda child: (child.id not in primary_ids, child.id))
+    selected_ids = set(session.exec(select(ObservationChild.child_id).where(
+        ObservationChild.observation_id == observation.id
+    )).all())
+    children.sort(key=lambda child: (child.id not in primary_ids, child.id not in selected_ids, child.id))
     return [child.name for child in children]
 
 
@@ -607,13 +649,170 @@ def _probe_video_duration(path: Path) -> Optional[float]:
     return None
 
 
-def _extract_video_frames(source: Path, count: int = 10) -> List[Dict]:
-    """用 ffmpeg 从视频里按时间均匀抽几帧，返回 [{timestamp_sec, data_uri}]。
+def suggested_frame_count(duration_sec: Optional[float]) -> int:
+    """按视频时长决定抽帧数量（与产品 1~3 分钟片段上限对齐）。
+
+    背景：短视频（如 8 秒）抽固定 10 帧几乎每一秒一帧，信息大量重复；
+    而 2~3 分钟视频统一 10 帧则帧间接近 9~18 秒，模型看到的是离散快照，
+    写出来的白描容易变成"第 X 秒时…"的刻板罗列，缺少来龙去脉。
+    因此按时长分档，长视频**加密度**（帧间 5~8 秒），以便白描连贯：
+      ≤10s   → 4 帧（3~5）
+      ≤30s   → 6 帧（5~8）
+      ≤60s   → 10 帧（8~12）
+      60~120s → 16 帧
+      120~180s → 20 帧（封顶，配合 3 分钟上限）。
+    更长的视频留待后续按内容/场景变化抽帧（分段 + 场景检测）。
+    """
+    if duration_sec is None or duration_sec <= 0:
+        return 10
+    if duration_sec <= 10:
+        return 4
+    if duration_sec <= 30:
+        return 6
+    if duration_sec <= 60:
+        return 10
+    if duration_sec <= 120:
+        return 16
+    return 20
+
+
+def _extract_frames_in_one_pass(exe: str, source: Path, count: int, duration: float) -> List[bytes]:
+    """用**一次** ffmpeg 进程，按 fps=count/duration 均匀抽出 count 帧 PNG 字节。
+
+    相比"每帧一次子进程"，把子进程开销从 N 次压到 1 次（外加空白帧的少量定向重采样）。
+    输出到临时目录再读回，避免解析连续 PNG 二进制流；失败返回空列表。
+    """
+    try:
+        fps = count / duration if duration > 0 else 1
+        with tempfile.TemporaryDirectory(prefix="frames-") as tmp:
+            pattern = str(Path(tmp) / "f-%04d.png")
+            subprocess.run(
+                [exe, "-y", "-i", str(source), "-vf", f"fps={fps:.6f}",
+                 "-frames:v", str(count), str(pattern)],
+                capture_output=True, timeout=60, check=False,
+            )
+            files = sorted(Path(tmp).glob("f-*.png"))
+            frames: List[bytes] = []
+            for f in files[:count]:
+                try:
+                    frames.append(f.read_bytes())
+                except OSError:
+                    continue
+            return frames
+    except Exception:
+        return []
+
+
+def _content_change_timestamps(exe: str, source: Path, duration: float, count: int) -> List[float]:
+    """基于相邻帧的下采样灰度签名差异，找出"内容变化最大"的时刻（scene-aware）。
+
+    用**一次** ffmpeg 进程抽取下采样灰度帧（scale=16x16, gray），再比较相邻帧差异
+    （像素变化比例），差异越大说明此处内容/动作变化越明显。返回按时间升序的时刻列表。
+    """
+    try:
+        steps = max(40, min(int(duration) * 2, 120))
+        fps = steps / duration if duration > 0 else 1
+        with tempfile.TemporaryDirectory(prefix="chg-") as tmp:
+            raw = str(Path(tmp) / "sig.raw")
+            subprocess.run(
+                [exe, "-y", "-i", str(source), "-vf",
+                 f"fps={fps:.6f},scale=16:16,format=gray",
+                 "-f", "rawvideo", "-pix_fmt", "gray", raw],
+                capture_output=True, timeout=60, check=False,
+            )
+            data = Path(raw).read_bytes()
+        sig_len = 16 * 16
+        chunks = [data[i:i + sig_len] for i in range(0, len(data) - sig_len + 1, sig_len)]
+        if len(chunks) < 3:
+            return []
+        scored: List[tuple] = []
+        for i in range(len(chunks) - 1):
+            a, b = chunks[i], chunks[i + 1]
+            diff = sum(1 for x, y in zip(a, b) if x != y) / sig_len
+            if diff <= 0.02:
+                continue
+            scored.append((diff, (i + 0.5) / steps * duration))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        spacing = duration / max(count, 1)
+        picked: List[float] = []
+        for _score, ts in scored:
+            if all(abs(ts - p) >= spacing for p in picked):
+                picked.append(ts)
+            if len(picked) >= max(2, count - 2):
+                break
+        return sorted(picked)
+    except Exception:
+        return []
+
+
+def _select_timestamps(duration: float, count: int, change_ts: List[float]) -> List[float]:
+    """合成最终抽帧时刻：优先内容变化点，再用均匀点补足到 count，并保留首尾。"""
+    ts: List[float] = [0.0, max(0.0, duration - 0.1)]
+    spacing = duration / max(count, 1)
+    for t in sorted(change_ts):
+        if all(abs(t - x) >= spacing for x in ts):
+            ts.append(t)
+        if len(ts) >= count:
+            break
+    if len(ts) < count and count > 1:
+        even = [duration * i / count for i in range(count)]
+        for t in even:
+            if all(abs(t - x) >= spacing for x in ts):
+                ts.append(t)
+            if len(ts) >= count:
+                break
+    return sorted(ts)[:count]
+
+
+def _finalize_frames(timestamps: List[float], frame_uris: List[Optional[str]], exe: str, source: Path, duration: float) -> List[Dict]:
+    """对一组 (时刻, data_uri) 做空白帧重采样 + 排序，返回最终帧列表。"""
+    frames: List[Dict] = []
+    for t, data_uri in zip(timestamps, frame_uris):
+        if data_uri is None:
+            continue
+        if _frame_is_blank(data_uri):
+            # 该时间点是空白帧 → 在附近重采样，取一帧有内容的
+            replaced = False
+            for delta in _blank_fallback_offsets(t, duration):
+                alt = _grab_frame(exe, source, t + delta, duration)
+                if alt is not None and not _frame_is_blank(alt):
+                    frames.append({"timestamp_sec": round(t + delta, 1), "data_uri": alt})
+                    replaced = True
+                    break
+            if not replaced:
+                # 实在找不到有内容的帧 → 保留原帧，交给提示词"跳过不写"
+                frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
+        else:
+            frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
+    frames.sort(key=lambda f: f["timestamp_sec"])
+    return frames
+
+
+def _frames_from_timestamps(exe: str, source: Path, timestamps: List[float], duration: float) -> List[Dict]:
+    """按给定时刻逐帧抽取（内容变化点）并做空白帧处理。"""
+    uris = [_grab_frame(exe, source, t, duration) for t in timestamps]
+    return _finalize_frames(timestamps, uris, exe, source, duration)
+
+
+def _even_frames(exe: str, source: Path, duration: float, count: int) -> List[Dict]:
+    """均匀抽帧：一次 ffmpeg 进程输出 count 帧，再做空白帧处理。"""
+    frame_datas = _extract_frames_in_one_pass(exe, source, count, duration)
+    if not frame_datas:
+        return []
+    timestamps = [duration * i / count for i in range(count)] if count > 1 else [0.0]
+    uris = ["data:image/png;base64," + base64.b64encode(data).decode("ascii") for data in frame_datas]
+    return _finalize_frames(timestamps, uris, exe, source, duration)
+
+
+def _extract_video_frames(source: Path, count: Optional[int] = None) -> List[Dict]:
+    """按"内容/场景变化"抽关键帧，返回 [{timestamp_sec, data_uri}]。
 
     依赖 imageio-ffmpeg（pip 自带 ffmpeg 二进制，无需系统安装）。
-    - 在 0 ~ 时长 之间均匀采 count 个点（含首尾），帧间覆盖更充分；
-    - 空白帧（纯黑/纯白/无内容）会在附近重采样，尽量覆盖有内容的画面；
-    - 抽帧失败或不是合法视频时返回空列表（调用方降级到 mock）。
+    - count 缺省时按视频时长自适应（见 suggested_frame_count）；显式传入则按给定值。
+    - 先用一次 ffmpeg 进程抽下采样灰度签名，找出相邻帧变化最大的时刻（scene-aware）；
+      抽帧时刻定为"内容变化点 + 均匀补足 + 首尾"，让白描更有来龙去脉。
+    - 无内容变化（连续镜头/失败）时回到一次进程的均匀抽帧；
+    - 空白帧在附近定向重采样；抽帧失败或不是合法视频时返回空列表（调用方降级到 mock）。
     """
     try:
         import imageio_ffmpeg
@@ -622,59 +821,93 @@ def _extract_video_frames(source: Path, count: int = 10) -> List[Dict]:
         return []
 
     try:
-        probe = subprocess.run(
-            [exe, "-i", str(source)], capture_output=True, text=True, timeout=30
-        )
-        duration = None
-        for line in probe.stderr.splitlines():
-            if "Duration:" in line:
-                m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", line)
-                if m:
-                    hours, minutes, seconds = m.group(1), m.group(2), m.group(3)
-                    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-                break
+        duration = _probe_video_duration(source)
         if not duration or duration <= 0:
             return []
 
-        if count <= 1:
-            timestamps = [0.0]
+        if count is None:
+            count = suggested_frame_count(duration)
+        count = max(1, int(count))
+
+        change_ts = _content_change_timestamps(exe, source, duration, count)
+        if len(change_ts) >= 2:
+            timestamps = _select_timestamps(duration, count, change_ts)
+            frames = _frames_from_timestamps(exe, source, timestamps, duration)
+            return frames if frames else _even_frames(exe, source, duration, count)
+
+        # 无明显内容变化（连续镜头/失败）→ 均匀抽帧
+        return _even_frames(exe, source, duration, count)
+    except Exception:
+        return []
+
+
+def extract_highlight_frames(source: Path, max_frames: int = 3) -> List[bytes]:
+    """从视频里挑几个"内容变化最大"的时刻，抽若干帧 PNG 作为「精彩瞬间」静态图。
+
+    用于导出观察记录时，在开头放几张代表性的画面（家长友好）。返回 PNG 列表；
+    无可用画面或图片无效时返回空列表（调用方跳过插入）。"""
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return []
+    try:
+        duration = _probe_video_duration(source)
+        if not duration or duration <= 0:
+            return []
+        change_ts = _content_change_timestamps(exe, source, duration, max(16, 20))
+        if not change_ts:
+            change_ts = [duration * 0.5]
+        # 均匀挑 max_frames 个变化时刻，让照片覆盖整段，而不是都挤在开头
+        if max_frames > 1 and len(change_ts) > 1:
+            idxs = sorted(set(round(i * (len(change_ts) - 1) / (max_frames - 1)) for i in range(max_frames)))
+            pick_ts = [change_ts[i] for i in idxs]
         else:
-            last = max(0.0, duration - 0.1)
-            timestamps = [duration * i / (count - 1) for i in range(count)]
-            timestamps[0] = 0.0
-            timestamps[-1] = last
-
-        frames: List[Dict] = []
-        for t in timestamps:
-            data_uri = _grab_frame(exe, source, t, duration)
-            if data_uri is None:
-                continue
-            if _frame_is_blank(data_uri):
-                # 该时间点是空白帧 → 在附近重采样，取一帧有内容的
-                replaced = False
-                for delta in _blank_fallback_offsets(t, duration):
-                    alt = _grab_frame(exe, source, t + delta, duration)
-                    if alt is not None and not _frame_is_blank(alt):
-                        frames.append({"timestamp_sec": round(t + delta, 1), "data_uri": alt})
-                        replaced = True
-                        break
-                if not replaced:
-                    # 实在找不到有内容的帧 → 保留原帧，交给提示词"跳过不写"
-                    frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
-            else:
-                frames.append({"timestamp_sec": round(t, 1), "data_uri": data_uri})
-
-        frames.sort(key=lambda f: f["timestamp_sec"])
+            pick_ts = change_ts[:max_frames]
+        frames = []
+        for ts in pick_ts:
+            result = subprocess.run(
+                [exe, "-y", "-ss", str(ts), "-i", str(source), "-frames:v", "1",
+                 "-vf", "scale='min(640,iw)':-2", "-f", "image2pipe", "-c:v", "png", "-"],
+                capture_output=True, timeout=30, check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                try:
+                    from PIL import Image
+                    Image.open(BytesIO(result.stdout)).verify()
+                except Exception:
+                    continue
+                frames.append(result.stdout)
         return frames
     except Exception:
         return []
+
+
+def prepare_export_photo(source: Path) -> Optional[bytes]:
+    """把上传照片转成 DOCX/PDF 都能稳定读取的 JPEG，并校正手机拍摄方向。"""
+    try:
+        if source.suffix.lower() in {".heic", ".heif"}:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        from PIL import Image, ImageOps
+
+        with Image.open(source) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image.thumbnail((1800, 1800))
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=88, optimize=True)
+            return output.getvalue()
+    except (ImportError, OSError, ValueError):
+        return None
 
 
 def _media_vision_frames(media: Media) -> Optional[List[Dict]]:
     """把素材转成"视觉模型可用的画面帧列表"，供豆包白描使用。
 
     - 图片：用原图（1 帧）。
-    - 视频：用 ffmpeg 按时间均匀抽 10 帧，按时间顺序给模型。
+    - 视频：用 ffmpeg 按时间均匀抽帧（帧数按视频时长自适应，见 suggested_frame_count），按时间顺序给模型。
     返回 None 表示没有任何可用画面（调用方降级到 mock）。
     每个元素形如 {"timestamp_sec": float|None, "data_uri": "data:image/...;base64,xxx"}。
     """
@@ -694,7 +927,7 @@ def _media_vision_frames(media: Media) -> Optional[List[Dict]]:
     source = UPLOAD_DIR / media.stored_filename
     if not source.is_file():
         return None
-    frames = _extract_video_frames(source, count=10)
+    frames = _extract_video_frames(source)
     return frames or None
 
 
@@ -712,26 +945,39 @@ def get_thumbnail_failure_reason(stored_filename: str) -> Optional[str]:
 
 
 def generate_video_thumbnail(source_path: Path) -> Optional[str]:
-    """使用 macOS 自带 Quick Look 抽取视频首帧；失败不影响素材保存。"""
+    """使用 imageio-ffmpeg 生成跨平台视频缩略图；失败不影响素材保存。"""
     thumbnail_path = get_thumbnail_path(source_path.name)
     error_path = get_thumbnail_error_path(source_path.name)
-    qlmanage = shutil.which("qlmanage")
-
-    if not qlmanage:
-        reason = "当前服务器没有可用的视频抽帧工具"
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        reason = "服务器视频处理组件不可用"
         error_path.write_text(reason, encoding="utf-8")
         return reason
 
     try:
         with tempfile.TemporaryDirectory(prefix="thumbnail-", dir=UPLOAD_DIR) as temp_dir:
+            generated_path = Path(temp_dir) / "thumbnail.png"
             result = subprocess.run(
-                [qlmanage, "-t", "-s", str(THUMBNAIL_SIZE), "-o", temp_dir, str(source_path)],
+                [
+                    exe,
+                    "-y",
+                    "-ss",
+                    "0.1",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    f"scale='min({THUMBNAIL_SIZE},iw)':-2",
+                    str(generated_path),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=False,
             )
-            generated_path = Path(temp_dir) / f"{source_path.name}.png"
             if result.returncode != 0 or not generated_path.is_file():
                 reason = "当前视频编码暂时无法生成缩略图"
                 error_path.write_text(reason, encoding="utf-8")
@@ -746,6 +992,7 @@ def generate_video_thumbnail(source_path: Path) -> Optional[str]:
         error_path.write_text(reason, encoding="utf-8")
         return reason
 
+    error_path.unlink(missing_ok=True)
     return None
 
 
@@ -764,6 +1011,7 @@ AUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 SMS_CODE_TTL_SECONDS = 5 * 60
 SMS_COOLDOWN_SECONDS = 60
 PRODUCTION_ENVS = {"production", "prod"}
+SECURE_COOKIE_ENVS = PRODUCTION_ENVS | {"demo"}
 
 
 def validate_phone(phone: str) -> str:
@@ -835,6 +1083,41 @@ def authenticated_account(
     return account, auth_session
 
 
+def authenticated_teacher(
+    session: Session,
+    request: Request,
+    authorization: Optional[str],
+):
+    """返回当前账号与教师，并校验账号、教师、班级、园所链路一致。"""
+    account, _ = authenticated_account(session, request, authorization)
+    teacher = session.get(Teacher, account.teacher_id)
+    room = session.get(ClassRoom, teacher.classroom_id) if teacher else None
+    if not teacher or not room or room.kindergarten_id != account.kindergarten_id:
+        raise HTTPException(401, "账号归属信息无效，请联系管理员")
+    return account, teacher
+
+
+def owned_observation(session: Session, teacher: Teacher, observation_id: int) -> Observation:
+    """只返回当前教师创建且属于当前班级的记录，避免用 id 枚举他人数据。"""
+    observation = session.get(Observation, observation_id)
+    if (
+        not observation
+        or observation.observer_id != teacher.id
+        or observation.classroom_id != teacher.classroom_id
+    ):
+        raise HTTPException(404, "观察记录不存在")
+    return observation
+
+
+def owned_media(session: Session, teacher: Teacher, media_id: int) -> Media:
+    """素材必须已经绑定到当前教师拥有的观察记录。"""
+    media = session.get(Media, media_id)
+    if not media or media.observation_id is None:
+        raise HTTPException(404, "素材不存在")
+    owned_observation(session, teacher, media.observation_id)
+    return media
+
+
 def account_response(session: Session, account: Account) -> AuthAccountResponse:
     teacher = session.get(Teacher, account.teacher_id)
     kindergarten = session.get(Kindergarten, account.kindergarten_id)
@@ -871,7 +1154,7 @@ def set_auth_cookie(response: Response, token: str):
         max_age=AUTH_TOKEN_TTL_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=RUNTIME_ENV in PRODUCTION_ENVS,
+        secure=RUNTIME_ENV in SECURE_COOKIE_ENVS,
         path="/",
     )
 
@@ -1379,19 +1662,9 @@ def list_children(
     request: Request,
     authorization: Optional[str] = Header(None),
 ):
-    """幼儿列表。
-
-    带登录态时只返回当前教师班级的幼儿，与「新增/删除幼儿只能作用于本班」保持一致；
-    无登录态时（demo 脚本、未开启登录的旧流程）返回全部，便于演示兼容。
-    """
+    """只返回当前教师班级的幼儿。"""
     with Session(engine) as s:
-        auth = authenticated_account(s, request, authorization, required=False)
-        if auth is None:
-            return s.exec(select(Child)).all()
-        account, _ = auth
-        teacher = s.get(Teacher, account.teacher_id)
-        if not teacher:
-            return []
+        _, teacher = authenticated_teacher(s, request, authorization)
         return s.exec(
             select(Child).where(Child.classroom_id == teacher.classroom_id)
         ).all()
@@ -1450,12 +1723,20 @@ def child_profile(
         ).all()
         linked_ids = {link.observation_id for link in links}
         legacy_observations = session.exec(
-            select(Observation).where(Observation.child_id == child.id)
+            select(Observation).where(
+                Observation.child_id == child.id,
+                Observation.observer_id == teacher.id,
+                Observation.classroom_id == teacher.classroom_id,
+            )
         ).all()
         observations_by_id = {item.id: item for item in legacy_observations}
         if linked_ids:
             linked_observations = session.exec(
-                select(Observation).where(Observation.id.in_(linked_ids))
+                select(Observation).where(
+                    Observation.id.in_(linked_ids),
+                    Observation.observer_id == teacher.id,
+                    Observation.classroom_id == teacher.classroom_id,
+                )
             ).all()
             observations_by_id.update({item.id: item for item in linked_observations})
         observations = list(observations_by_id.values())
@@ -1582,11 +1863,17 @@ def delete_child(
 
 
 @app.patch("/children/{child_id}", response_model=ChildResponse, tags=["基础"])
-def update_child(child_id: int, payload: ChildUpdate):
+def update_child(
+    child_id: int,
+    payload: ChildUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """修改已有幼儿的姓名、出生日期或性别。"""
     with Session(engine) as s:
+        _, teacher = authenticated_teacher(s, request, authorization)
         child = s.get(Child, child_id)
-        if not child:
+        if not child or child.classroom_id != teacher.classroom_id:
             raise HTTPException(404, "幼儿不存在")
 
         data = payload.model_dump(exclude_unset=True)
@@ -1601,18 +1888,28 @@ def update_child(child_id: int, payload: ChildUpdate):
 
 
 @app.get("/teachers", response_model=List[TeacherResponse], tags=["基础"])
-def list_teachers():
-    """所有教师；供极简设置页读取。"""
+def list_teachers(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """只返回当前登录教师；园所成员列表使用园所专用接口。"""
     with Session(engine) as s:
-        return s.exec(select(Teacher)).all()
+        _, teacher = authenticated_teacher(s, request, authorization)
+        return [teacher]
 
 
 @app.patch("/teachers/{teacher_id}", response_model=TeacherResponse, tags=["基础"])
-def update_teacher(teacher_id: int, payload: TeacherUpdate):
+def update_teacher(
+    teacher_id: int,
+    payload: TeacherUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """修改已有教师的姓名。"""
     with Session(engine) as s:
+        _, current_teacher = authenticated_teacher(s, request, authorization)
         teacher = s.get(Teacher, teacher_id)
-        if not teacher:
+        if not teacher or teacher.id != current_teacher.id:
             raise HTTPException(404, "教师不存在")
 
         data = payload.model_dump(exclude_unset=True)
@@ -1643,62 +1940,86 @@ def list_indicators():
     tags=["1·素材"],
 )
 async def upload_media(
+    request: Request,
     file: UploadFile = File(...),
+    observation_id: int = Query(..., description="当前账号拥有的待上传观察记录 id"),
     duration_sec: Optional[int] = Query(
         None, description="视频时长（秒）。指标 1.1 的层级分界靠它纯计算得出，零幻觉。照片可不填。"
     ),
+    authorization: Optional[str] = Header(None),
 ):
-    """上传一份模拟照片或视频，同时在 media 表登记一条"""
+    """上传素材并直接绑定到当前教师拥有的待上传记录。"""
     content_type, ext = resolve_upload_type(file)
     stored_filename = f"{uuid4().hex}{ext}"
     stored_path = UPLOAD_DIR / stored_filename
     size = 0
 
-    try:
-        with stored_path.open("wb") as destination:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_SIZE:
-                    raise HTTPException(413, "文件不能超过 200MB")
-                destination.write(chunk)
-    except Exception:
-        stored_path.unlink(missing_ok=True)
-        raise
-
-    # 视频：探测真实时长；超过建议上限（3 分钟）直接拒绝，避免拉低白描质量。并回填真实时长。
-    real_duration_sec = duration_sec
-    if content_type.startswith("video/"):
-        probed = _probe_video_duration(stored_path)
-        if probed is not None:
-            real_duration_sec = int(round(probed))
-        elif duration_sec is None:
-            real_duration_sec = None
-        if probed is not None and probed > MAX_DURATION_SEC:
-            stored_path.unlink(missing_ok=True)
-            raise HTTPException(
-                422,
-                "视频太长了，建议录 1~3 分钟的片段。超过 3 分钟会影响白描效果，请缩短后再上传。",
-            )
-        generate_video_thumbnail(stored_path)
-
     with Session(engine) as s:
-        media = Media(
-            stored_filename=stored_filename,
-            content_type=content_type,
-            size=size,
-            duration_sec=real_duration_sec,
-        )
-        s.add(media)
-        s.commit()
-        s.refresh(media)
-        return media_response(media)
+        _, teacher = authenticated_teacher(s, request, authorization)
+        observation = owned_observation(s, teacher, observation_id)
+        if observation.status != "uploaded":
+            raise HTTPException(409, "这条记录已经进入整理阶段，不能继续上传素材")
+
+        try:
+            with stored_path.open("wb") as destination:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_SIZE:
+                        raise HTTPException(413, "文件不能超过 200MB")
+                    destination.write(chunk)
+
+            real_duration_sec = duration_sec
+            if content_type.startswith("video/"):
+                probed = _probe_video_duration(stored_path)
+                if probed is not None:
+                    real_duration_sec = int(round(probed))
+                if probed is not None and probed > MAX_DURATION_SEC:
+                    raise HTTPException(
+                        422,
+                        "视频太长了，建议录 1~3 分钟的片段。超过 3 分钟会影响白描效果，请缩短后再上传。",
+                    )
+                generate_video_thumbnail(stored_path)
+
+            media = Media(
+                stored_filename=stored_filename,
+                content_type=content_type,
+                size=size,
+                duration_sec=real_duration_sec,
+                observation_id=observation.id,
+            )
+            if observation.media_type is None:
+                observation.media_type = "video" if content_type.startswith("video/") else "image"
+            s.add(media)
+            s.add(observation)
+            s.commit()
+            s.refresh(media)
+            return media_response(media)
+        except Exception:
+            for artifact in (
+                stored_path,
+                get_thumbnail_path(stored_filename),
+                get_thumbnail_error_path(stored_filename),
+            ):
+                artifact.unlink(missing_ok=True)
+            raise
 
 
 @app.get("/media", response_model=List[MediaResponse], tags=["1·素材"])
-def list_media():
-    """所有已上传的素材"""
+def list_media(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """当前教师观察记录绑定的全部素材。"""
     with Session(engine) as s:
-        return [media_response(media) for media in s.exec(select(Media)).all()]
+        _, teacher = authenticated_teacher(s, request, authorization)
+        observation_ids = select(Observation.id).where(
+            Observation.observer_id == teacher.id,
+            Observation.classroom_id == teacher.classroom_id,
+        )
+        rows = s.exec(
+            select(Media).where(Media.observation_id.in_(observation_ids))
+        ).all()
+        return [media_response(media) for media in rows]
 
 
 @app.get(
@@ -1719,12 +2040,15 @@ def list_media():
     },
     tags=["1·素材"],
 )
-def get_media_file(media_id: int):
+def get_media_file(
+    media_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """读取一份已上传素材，供前端展示图片或视频首帧。"""
     with Session(engine) as s:
-        media = s.get(Media, media_id)
-        if not media:
-            raise HTTPException(404, "素材不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        media = owned_media(s, teacher, media_id)
 
         if Path(media.stored_filename).name != media.stored_filename:
             raise HTTPException(404, "素材文件不存在")
@@ -1744,12 +2068,15 @@ def get_media_file(media_id: int):
     },
     tags=["1·素材"],
 )
-def get_media_thumbnail(media_id: int):
+def get_media_thumbnail(
+    media_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """返回服务端生成的视频缩略图；历史视频首次读取时补生成。"""
     with Session(engine) as s:
-        media = s.get(Media, media_id)
-        if not media:
-            raise HTTPException(404, "素材不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        media = owned_media(s, teacher, media_id)
         if not media.content_type.startswith("video/"):
             raise HTTPException(400, "图片素材无需生成视频缩略图")
         if Path(media.stored_filename).name != media.stored_filename:
@@ -1788,20 +2115,15 @@ def create_observation(
 ):
     """现场新建观察记录；只要求游戏区，状态固定为 uploaded。"""
     with Session(engine) as s:
-        authenticated = authenticated_account(
-            s, request, authorization, required=False,
-        )
-        teacher_id = authenticated[0].teacher_id if authenticated else DEFAULT_TEACHER_ID
-        teacher = s.get(Teacher, teacher_id)
-        if not teacher:
-            raise HTTPException(500, "账号关联的教师信息不存在")
-        if not authenticated and teacher.classroom_id != DEFAULT_CLASSROOM_ID:
-            raise HTTPException(500, "默认教师与默认班级配置不一致")
+        _, teacher = authenticated_teacher(s, request, authorization)
         room = s.get(ClassRoom, teacher.classroom_id)
         if not room:
-            raise HTTPException(500, "默认班级配置无效，请检查 DEFAULT_CLASSROOM_ID")
-        if payload.child_id is not None and not s.get(Child, payload.child_id):
-            raise HTTPException(404, f"找不到 id={payload.child_id} 的幼儿")
+            raise HTTPException(500, "账号关联的班级信息不存在")
+        child = s.get(Child, payload.child_id) if payload.child_id is not None else None
+        if payload.child_id is not None and (
+            not child or child.classroom_id != teacher.classroom_id
+        ):
+            raise HTTPException(404, "幼儿不存在")
         observation = Observation(
             child_id=payload.child_id,
             area_id=payload.area_id,
@@ -1850,6 +2172,7 @@ def observed_at_day_bounds(
     tags=["2·观察记录"],
 )
 def list_observations(
+    request: Request,
     status: Optional[ObservationStatus] = Query(None, description="按处理状态过滤"),
     child_id: Optional[int] = Query(
         None, description="按幼儿过滤：该幼儿是主角或关联幼儿的记录都会返回"
@@ -1863,8 +2186,14 @@ def list_observations(
         None,
         description="观察日期（北京时间）截止日，含当天，格式 YYYY-MM-DD",
     ),
+    indicator_code: Optional[str] = Query(
+        None, description="按已采纳指标编码过滤，如 1.3"
+    ),
+    limit: int = Query(20, ge=1, le=100, description="每页数量"),
+    offset: int = Query(0, ge=0, description="跳过数量"),
+    authorization: Optional[str] = Header(None),
 ):
-    """所有观察记录（简要），可按状态 / 幼儿 / 区域 / 观察日期区间组合过滤。"""
+    """当前教师的观察记录，可组合筛选并按观察时间倒序分页。"""
     if (
         date_from is not None
         and date_to is not None
@@ -1872,12 +2201,21 @@ def list_observations(
     ):
         raise HTTPException(422, "date_from 不能晚于 date_to")
     with Session(engine) as s:
-        if child_id is not None and s.get(Child, child_id) is None:
-            raise HTTPException(404, f"找不到 id={child_id} 的幼儿")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        child = s.get(Child, child_id) if child_id is not None else None
+        if child_id is not None and (
+            not child or child.classroom_id != teacher.classroom_id
+        ):
+            raise HTTPException(404, "幼儿不存在")
         if area_id is not None and s.get(Area, area_id) is None:
             raise HTTPException(404, f"找不到 id={area_id} 的游戏区域")
+        if indicator_code is not None and indicator_code not in INDICATORS:
+            raise HTTPException(404, "观察指标不存在")
 
-        statement = select(Observation)
+        statement = select(Observation).where(
+            Observation.observer_id == teacher.id,
+            Observation.classroom_id == teacher.classroom_id,
+        )
         if status is not None:
             statement = statement.where(Observation.status == status)
         if area_id is not None:
@@ -1894,24 +2232,37 @@ def list_observations(
                     Observation.child_id == child_id,
                 )
             )
+        if indicator_code is not None:
+            tagged_ids = select(ObservationTag.observation_id).where(
+                ObservationTag.indicator_code == indicator_code,
+                ObservationTag.accepted == True,  # noqa: E712
+            )
+            statement = statement.where(Observation.id.in_(tagged_ids))
         if date_from is not None or date_to is not None:
             start, end_exclusive = observed_at_day_bounds(date_from, date_to)
             if start is not None:
                 statement = statement.where(Observation.observed_at >= start)
             if end_exclusive is not None:
                 statement = statement.where(Observation.observed_at < end_exclusive)
+        statement = statement.order_by(
+            Observation.observed_at.desc(), Observation.id.desc()
+        ).offset(offset).limit(limit)
         return s.exec(statement).all()
 
 
 @app.post("/observations/{obs_id}/attach-media", tags=["2·观察记录"])
-def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定的素材 id")):
-    """把已上传的素材绑定到这条观察记录上"""
+def attach_media(
+    obs_id: int,
+    request: Request,
+    media_id: int = Query(..., description="要绑定的素材 id"),
+    authorization: Optional[str] = Header(None),
+):
+    """兼容旧客户端：只允许确认素材已绑定到同一条自有记录。"""
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
-        media = s.get(Media, media_id)
-        if not media:
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        media = owned_media(s, teacher, media_id)
+        if media.observation_id != obs.id:
             raise HTTPException(404, "素材不存在")
         if obs.status != "uploaded":
             raise HTTPException(
@@ -1923,17 +2274,65 @@ def attach_media(obs_id: int, media_id: int = Query(..., description="要绑定�
                 },
             )
 
-        media.observation_id = obs_id
-        if obs.media_type is None:
-            if media.content_type.startswith("image/"):
-                obs.media_type = "image"
-            elif media.content_type.startswith("video/"):
-                obs.media_type = "video"
-        s.add(media)
-        s.add(obs)
-        s.commit()
         return {"ok": True, "observation_id": obs_id, "media_id": media_id,
                 "media_type": obs.media_type, "status": obs.status}
+
+
+def observation_child_ids(session: Session, obs: Observation) -> List[int]:
+    links = session.exec(select(ObservationChild).where(
+        ObservationChild.observation_id == obs.id
+    ).order_by(ObservationChild.is_primary.desc(), ObservationChild.child_id)).all()
+    return [link.child_id for link in links] or ([obs.child_id] if obs.child_id else [])
+
+
+def context_digest(session: Session, obs: Observation, *, narrative=False, mode="focused") -> str:
+    data = {"children": observation_child_ids(session, obs), "area": obs.area_id,
+            "age": obs.age_group, "note": obs.note or "",
+            "purpose": (obs.purpose or "").strip() if mode == "focused" else ""}
+    if narrative:
+        data["narrative"] = obs.narrative or ""
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def latest_workflow_run(session: Session, obs: Observation, workflow: str):
+    return session.exec(select(AIRun).where(
+        AIRun.observation_id == obs.id, AIRun.workflow == workflow
+    ).order_by(AIRun.id.desc())).first()
+
+
+def run_context(run):
+    return (run.response_raw or {}).get("_bangbang_context", {}) if run else {}
+
+
+def narrative_context_changed(session: Session, obs: Observation) -> bool:
+    context = run_context(latest_workflow_run(session, obs, "narrative"))
+    return bool(context and context.get("identity_digest", context.get("digest")) != context_digest(
+        session, obs, mode=context.get("mode", "focused")))
+
+
+def suggestions_current(session: Session, obs: Observation) -> bool:
+    context = run_context(latest_workflow_run(session, obs, "indicator_suggestion"))
+    return bool(context and context.get("digest") == context_digest(session, obs, narrative=True))
+
+
+def current_observation_tags(session: Session, obs: Observation):
+    """旧轮次留在数据库用于审计，不混入当前判断和导出。无 AI run 的手工历史条目兼容保留。"""
+    tags = session.exec(select(ObservationTag).where(ObservationTag.observation_id == obs.id)).all()
+    run = latest_workflow_run(session, obs, "indicator_suggestion")
+    current = suggestions_current(session, obs)
+    return [tag for tag in tags if (tag.ai_run_id is None and run is None) or
+            (current and tag.ai_run_id == run.id)]
+
+
+def subject_prompt(session: Session, obs: Observation) -> str:
+    aliases = [ai_service._child_alias(i) for i, _ in enumerate(observation_child_ids(session, obs))]
+    if not aliases:
+        roles = "尚未对应姓名，请记录能够区分的幼儿，并保持同一人物代号一致"
+    else:
+        roles = "主观察幼儿：" + aliases[0] + "。同时记录的其他幼儿：" + ("、".join(aliases[1:]) or "未选择")
+        roles += "。分析以主观察幼儿的行为为依据，其他幼儿的行为只提供互动背景，不得移到主观察幼儿身上"
+    return roles + "。衣着位置提示：" + (obs.note or "未提供，无法仅凭名单确定画面中谁是主体；不得凭出场顺序或行为多少猜测身份，人物对应需教师核对")
+
 
 
 @app.put("/observations/{obs_id}/children", tags=["2·观察记录"])
@@ -1948,15 +2347,8 @@ def replace_observation_children(
     if not child_ids:
         raise HTTPException(422, "请至少选择一名幼儿")
     with Session(engine) as session:
-        account, _ = authenticated_account(session, request, authorization)
-        teacher = session.get(Teacher, account.teacher_id)
-        observation = session.get(Observation, obs_id)
-        if (
-            not teacher
-            or not observation
-            or observation.classroom_id != teacher.classroom_id
-        ):
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(session, request, authorization)
+        observation = owned_observation(session, teacher, obs_id)
         if observation.status not in {"uploaded", "ready_for_review", "failed"}:
             raise HTTPException(400, f"状态为 {observation.status} 时不能修改观察幼儿")
 
@@ -1987,17 +2379,21 @@ def replace_observation_children(
 
 
 @app.patch("/observations/{obs_id}", tags=["2·观察记录"])
-def update_observation(obs_id: int, payload: ObservationUpdate):
+def update_observation(
+    obs_id: int,
+    payload: ObservationUpdate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """教师补幼儿和现场说明，或修改观察目的 / 白描 / 分析 / 措施。"""
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
 
         data = payload.model_dump(exclude_unset=True)
 
-        context_fields = {"child_id", "note"} & data.keys()
-        if context_fields and obs.status not in {"uploaded", "ready_for_review"}:
+        context_fields = {"child_id", "note", "purpose", "narrative"} & data.keys()
+        if context_fields and obs.status not in {"uploaded", "ready_for_review", "failed", "confirmed"}:
             raise HTTPException(
                 400,
                 detail={
@@ -2006,8 +2402,16 @@ def update_observation(obs_id: int, payload: ObservationUpdate):
                 },
             )
         if "child_id" in data and data["child_id"] is not None:
-            if not s.get(Child, data["child_id"]):
-                raise HTTPException(404, f"找不到 id={data['child_id']} 的幼儿")
+            child = s.get(Child, data["child_id"])
+            if not child or child.classroom_id != teacher.classroom_id:
+                raise HTTPException(404, "幼儿不存在")
+
+        if obs.status == "confirmed" and any(
+            key in data and (data[key] or "") != (getattr(obs, key) or "")
+            for key in {"child_id", "note", "purpose", "narrative"}
+        ) or (obs.status == "confirmed" and any(key in data and not (data[key] or "").strip() for key in {"analysis", "strategy"})):
+            transition_observation(obs, "ready_for_review")
+            obs.confirmed_at = None
 
         # 教师动过 AI 白描 → 来源自动从 ai 变成 ai_edited
         if "narrative" in data and obs.narrative_source == "ai":
@@ -2026,28 +2430,37 @@ def update_observation(obs_id: int, payload: ObservationUpdate):
         return obs
 
 
+def require_analysis_and_strategy(obs: Observation):
+    missing = [label for field, label in [("analysis", "观察分析"), ("strategy", "支持策略")] if not (getattr(obs, field) or "").strip()]
+    if missing:
+        raise HTTPException(400, "请填写" + "和".join(missing))
+
+
 @app.post("/observations/{obs_id}/confirm", tags=["2·观察记录"])
-def confirm_observation(obs_id: int):
-    """教师定稿。要求幼儿、白描和至少一个已采纳的指标都到位。"""
+def confirm_observation(
+    obs_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """教师定稿。要求幼儿、观察目标、白描和至少一个已采纳的指标都到位。"""
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
         ensure_status_transition(obs, "confirmed")
         if obs.child_id is None:
             raise HTTPException(400, "请先选择这条记录关于哪位幼儿")
+        if not obs.purpose or not obs.purpose.strip():
+            raise HTTPException(400, "请至少填写一个观察目标")
         if not obs.narrative:
             raise HTTPException(400, "还没有白描，不能定稿")
 
-        accepted = s.exec(
-            select(ObservationTag).where(
-                ObservationTag.observation_id == obs_id,
-                ObservationTag.accepted == True,  # noqa: E712
-            )
-        ).all()
+        if narrative_context_changed(s, obs):
+            raise HTTPException(409, "观察对象或目标已改变，请重新生成并核对白描")
+        accepted = [tag for tag in current_observation_tags(s, obs) if tag.accepted is True]
         if not accepted:
             raise HTTPException(400, "还没有任何已采纳的指标，不能定稿")
 
+        require_analysis_and_strategy(obs)
         transition_observation(obs, "confirmed")
         s.add(obs)
         s.commit()
@@ -2068,14 +2481,8 @@ def delete_observation(
     观察指标、多人关联和 AI 调用审计。属于明确的"整条记录做删除"。
     """
     with Session(engine) as s:
-        account, _ = authenticated_account(s, request, authorization)
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
-
-        # 说明：观察记录列表本身不按班级隔离（演示环境所有记录可见），
-        # 因此删除也不按班级拦截，方便教师清理导入的测试记录。
-        # 观察记录删除属于"整条记录清理"，不做级联 / 二次确认的额外参数。
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
         # 素材：删除数据库记录 + 磁盘文件与缩略图
         media_list = s.exec(
             select(Media).where(Media.observation_id == obs_id)
@@ -2122,16 +2529,26 @@ def delete_observation(
     response_model=NarrativeGenerationResponse,
     tags=["3·AI"],
 )
-def generate_narrative(obs_id: int):
+def generate_narrative(
+    obs_id: int,
+    request: Request,
+    mode: Literal["focused", "explore"] = Query("focused"),
+    authorization: Optional[str] = Header(None),
+):
     """
     【AI 工作流 A】根据绑定的素材生成客观白描。
     结果写入 narrative + narrative_ai_raw，来源标记为 ai。
     """
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
 
+        if mode == "focused" and not (obs.purpose or "").strip():
+            raise HTTPException(400, "请先选择或添加观察目标；暂无目标可选先看看素材")
+        names = classroom_child_names_for_anonymization(s, obs)
+        purpose = ai_service._anonymize_narrative(obs.purpose or "", names) if mode == "focused" else ""
+        subjects = ai_service._anonymize_narrative(subject_prompt(s, obs), names)
+        input_digest = context_digest(s, obs, mode=mode)
         area = s.get(Area, obs.area_id)
         media = s.exec(
             select(Media).where(Media.observation_id == obs_id)
@@ -2152,14 +2569,14 @@ def generate_narrative(obs_id: int):
         if media.content_type.startswith("video/"):
             media_path = UPLOAD_DIR / media.stored_filename
             if media_path.is_file():
-                asr = asr_service.transcribe_video(media_path)
+                asr = asr_service.transcribe_video(media_path, duration_sec=media.duration_sec)
                 if asr and not asr.get("is_mock"):
-                    transcript = asr.get("transcript")
+                    transcript = ai_service._anonymize_narrative(asr.get("transcript") or "", names)
 
-        # 观察对象幼儿数量（老师选择的），决定白描描写哪几位主体；未选时默认 1。
+        # 预选人数只作提示；未选时由素材中的可见人物确定，不默认单人。
         child_count_hint = len(s.exec(
             select(ObservationChild).where(ObservationChild.observation_id == obs_id)
-        ).all()) or 1
+        ).all()) or None
 
         try:
             result = ai_service.generate_narrative(
@@ -2170,6 +2587,8 @@ def generate_narrative(obs_id: int):
                 frames=vision_frames,
                 transcript=transcript,
                 child_count_hint=child_count_hint,
+                purpose=purpose,
+                subject_context=subjects,
             )
         except Exception as exc:
             transition_observation(
@@ -2186,8 +2605,14 @@ def generate_narrative(obs_id: int):
         obs.narrative_source = "ai"
         transition_observation(obs, "ready_for_review")
         s.add(obs)
-        if result.get("ai_run"):
-            s.add(AIRun(observation_id=obs_id, **result["ai_run"]))
+        metadata = result.get("ai_run") or {
+            "workflow": "narrative", "provider": "mock", "model": result["engine"],
+            "prompt_version": "wf-a-context-v1", "status": "completed", "is_mock": True,
+            "prompt_rendered": "mock 模式未发送外部请求",
+        }
+        metadata["response_raw"] = {**(metadata.get("response_raw") or {}),
+            "_bangbang_context": {"mode": mode, "digest": input_digest}}
+        s.add(AIRun(observation_id=obs_id, **metadata))
         s.commit()
         s.refresh(obs)
 
@@ -2204,8 +2629,91 @@ def generate_narrative(obs_id: int):
         }
 
 
+@app.post("/observations/{obs_id}/people", tags=["3·AI"])
+def observation_people(obs_id: int, request: Request, authorization: Optional[str] = Header(None)):
+    with Session(engine) as s:
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        if not (obs.narrative or "").strip():
+            raise HTTPException(400, "请先生成白描")
+        digest = hashlib.sha256(obs.narrative.encode()).hexdigest()
+        run = latest_workflow_run(s, obs, "person_grouping")
+        raw = (run.response_raw or {}) if run else {}
+        if raw.get("digest") == digest:
+            return {**raw["result"], "narrative": obs.narrative}
+        result = person_service.identify_people(obs.narrative, classroom_child_names_for_anonymization(s, obs))
+        s.add(AIRun(observation_id=obs_id, workflow="person_grouping", provider=result["method"], model="narrative-person-grouping",
+                    prompt_version="person-grouping-v1", status="completed", is_mock=result["method"] == "rules",
+                    prompt_rendered="只依据白描衣着、位置及行为归组；不推断身份", response_raw={"digest": digest, "result": result}))
+        s.commit()
+        return {**result, "narrative": obs.narrative}
+
+
+@app.post("/observations/{obs_id}/people/assign", tags=["4·教师确认"])
+def assign_observation_people(obs_id: int, payload: PeopleAssignment, request: Request, authorization: Optional[str] = Header(None)):
+    with Session(engine) as s:
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        if obs.status not in {"ready_for_review", "confirmed"}:
+            raise HTTPException(400, "请等待白描完成后对应姓名")
+        if payload.narrative != obs.narrative:
+            raise HTTPException(409, "白描已修改，请重新整理人物后再代入")
+        if narrative_context_changed(s, obs):
+            raise HTTPException(409, "观察目标或人物提示已改变，请先重新生成白描")
+        refs = person_service.references(obs.narrative, classroom_child_names_for_anonymization(s, obs))
+        names, ids = {}, []
+        for assignment in payload.assignments:
+            child = s.get(Child, assignment.child_id)
+            if not child or child.classroom_id != teacher.classroom_id:
+                raise HTTPException(404, "幼儿不存在")
+            if not assignment.ref_indexes:
+                raise HTTPException(422, "请选择要对应的人物")
+            ids.append(child.id)
+            for i in assignment.ref_indexes:
+                if i < 0 or i >= len(refs) or refs[i]['group'] or i in names:
+                    raise HTTPException(422, "人物引用无效或重复")
+                names[i] = child.name
+        if not names:
+            raise HTTPException(422, "请至少为一位幼儿选择姓名")
+        original_ids = observation_child_ids(s, obs)
+        # Preserve earlier assignments in partial mapping and the original selected subjects.
+        ids = list(dict.fromkeys(original_ids + ids))
+        text = obs.narrative
+        for i in sorted(names, reverse=True):
+            ref = refs[i]
+            text = text[:ref['start']] + names[i] + text[ref['end']:]
+        obs.narrative = text
+        obs.narrative_source = "ai_edited"
+        obs.child_id = ids[0]
+        for i, child_id in enumerate(ids):
+            link = s.get(ObservationChild, (obs_id, child_id))
+            if not link:
+                link = ObservationChild(observation_id=obs_id, child_id=child_id, is_primary=i == 0)
+            s.add(link)
+        if obs.status == "confirmed":
+            transition_observation(obs, "ready_for_review")
+            obs.confirmed_at = None
+        s.add(obs)
+        s.flush()
+        run = latest_workflow_run(s, obs, "narrative")
+        if run and run_context(run):
+            raw = dict(run.response_raw or {})
+            context = dict(run_context(run))
+            context["identity_digest"] = context_digest(s, obs, mode=context.get("mode", "focused"))
+            context["identity_confirmed_at"] = utc_now().isoformat()
+            raw["_bangbang_context"] = context
+            run.response_raw = raw
+            s.add(run)
+        s.commit()
+        return {"narrative": obs.narrative, "child_ids": ids}
+
+
 @app.post("/observations/{obs_id}/suggest-tags", tags=["3·AI"])
-def suggest_tags(obs_id: int):
+def suggest_tags(
+    obs_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """
     【AI 工作流 B】根据白描 + 区域 + 年龄段，推荐 2-3 个候选指标。
 
@@ -2214,9 +2722,16 @@ def suggest_tags(obs_id: int):
     - suggestions → source=ai_suggested、accepted=None（等待教师决定）
     """
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        if not observation_child_ids(s, obs):
+            raise HTTPException(400, "请先选择观察幼儿")
+        if not (obs.purpose or "").strip():
+            raise HTTPException(400, "请先选择或添加观察目标")
+        if narrative_context_changed(s, obs):
+            raise HTTPException(409, "观察对象或目标已改变，请重新生成并核对白描")
+        if obs.status == "processing":
+            raise HTTPException(409, "正在整理，请稍后再试")
         if not obs.narrative:
             raise HTTPException(400, "还没有白描，请先调用 narrative 接口")
 
@@ -2231,19 +2746,12 @@ def suggest_tags(obs_id: int):
         area = s.get(Area, obs.area_id)
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).first()
 
-        existing_candidates = s.exec(
-            select(ObservationTag).where(
-                ObservationTag.observation_id == obs_id,
-                ObservationTag.source.in_({"system_determined", "ai_suggested"}),
-            )
-        ).all()
-        if existing_candidates:
+        existing_candidates = [tag for tag in current_observation_tags(s, obs)
+                               if tag.source in {"system_determined", "ai_suggested"}]
+        if suggestions_current(s, obs):
             system_tags = [t for t in existing_candidates if t.source == "system_determined"]
             ai_tags = [t for t in existing_candidates if t.source == "ai_suggested"]
-            linked_run = next(
-                (s.get(AIRun, tag.ai_run_id) for tag in existing_candidates if tag.ai_run_id),
-                None,
-            )
+            linked_run = latest_workflow_run(s, obs, "indicator_suggestion")
             return {
                 "observation_id": obs_id,
                 "status": obs.status,
@@ -2276,17 +2784,11 @@ def suggest_tags(obs_id: int):
                 "hint": "quant_hits 是纯计算命中（如视频时长），不走模型，界面上应标为「系统判定」而非「AI 建议」。",
             }
 
-        # 同一条记录重复调用时，先清掉上一轮还没处理的 AI 候选
-        old = s.exec(
-            select(ObservationTag).where(
-                ObservationTag.observation_id == obs_id,
-                ObservationTag.source == "ai_suggested",
-                ObservationTag.accepted == None,  # noqa: E711
-            )
-        ).all()
-        for t in old:
-            s.delete(t)
-        s.commit()
+        input_digest = context_digest(s, obs, narrative=True)
+        if obs.status != "processing":
+            transition_observation(obs, "processing")
+            s.add(obs)
+            s.commit()
 
         try:
             result = ai_service.suggest_indicators(
@@ -2296,6 +2798,8 @@ def suggest_tags(obs_id: int):
                 age_group=obs.age_group,
                 duration_sec=media.duration_sec if media else None,
                 child_names=classroom_child_names_for_anonymization(s, obs),
+                purpose=obs.purpose.strip(),
+                subject_context=subject_prompt(s, obs),
             )
         except Exception as exc:
             transition_observation(
@@ -2307,6 +2811,8 @@ def suggest_tags(obs_id: int):
             s.commit()
             raise HTTPException(500, obs.failure_reason) from exc
 
+        result["ai_run"]["response_raw"] = {**(result["ai_run"].get("response_raw") or {}),
+            "_bangbang_context": {"digest": input_digest}}
         run = AIRun(observation_id=obs_id, **result["ai_run"])
         s.add(run)
         s.flush()
@@ -2385,29 +2891,89 @@ def suggest_tags(obs_id: int):
         }
 
 
+@app.post(
+    "/observations/{obs_id}/suggest-analysis",
+    response_model=AnalysisSuggestionResponse,
+    tags=["3·AI"],
+)
+def suggest_analysis(
+    obs_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """【AI 工作流 C】根据白描 + 已确认指标，给出「观察分析 + 下一步支持策略」的思路支架。
+
+    返回的 analysis / strategy 是**可改写的建议**，教师据此自行定稿；与教师的正式分析/措施分开返回与展示。
+    真实走 DeepSeek，失败降级为规则支架（is_mock=True）。
+    """
+    with Session(engine) as s:
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        area = s.get(Area, obs.area_id)
+
+        accepted = [tag for tag in current_observation_tags(s, obs) if tag.accepted is True]
+        indicator_names = [tag.indicator_name for tag in accepted if tag.indicator_name]
+
+        result = ai_service.suggest_analysis_and_strategy(
+            narrative=obs.narrative or "",
+            area_name=area.name if area else None,
+            indicator_names=indicator_names,
+            child_count_hint=len(s.exec(
+                select(ObservationChild).where(ObservationChild.observation_id == obs_id)
+            ).all()) or 1,
+        )
+        if result.get("ai_run"):
+            s.add(AIRun(observation_id=obs_id, **result["ai_run"]))
+            s.commit()
+
+        return {
+            "observation_id": obs_id,
+            "analysis": result["analysis"],
+            "strategy": result["strategy"],
+            "is_mock": result["is_mock"],
+            "engine": result["engine"],
+            "notice": result["notice"],
+        }
+
+
 # ============================================================
 # 4. 教师确认环节
 # ============================================================
 
 @app.get("/observations/{obs_id}/tags", tags=["4·教师确认"])
-def list_tags(obs_id: int):
+def list_tags(
+    obs_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """这条记录上所有指标标注"""
     with Session(engine) as s:
-        return s.exec(
-            select(ObservationTag).where(ObservationTag.observation_id == obs_id)
-        ).all()
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
+        return current_observation_tags(s, obs)
 
 
 @app.patch("/observations/{obs_id}/tags/{tag_id}", tags=["4·教师确认"])
-def decide_tag(obs_id: int, tag_id: int, decision: TagDecision):
+def decide_tag(
+    obs_id: int,
+    tag_id: int,
+    decision: TagDecision,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """
     教师采纳或否掉一条 AI 候选，或取消 / 恢复一条系统判定。
     AI 建议的 accepted 字段是「AI 候选采纳率」的数据来源。
     """
     with Session(engine) as s:
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
         tag = s.get(ObservationTag, tag_id)
         if not tag or tag.observation_id != obs_id:
             raise HTTPException(404, "标注不存在")
+
+        if tag.id not in {item.id for item in current_observation_tags(s, obs)}:
+            raise HTTPException(409, "观察内容已更新，请重新推荐指标")
 
         tag.accepted = decision.accepted
         tag.resolved_at = utc_now()
@@ -2419,7 +2985,12 @@ def decide_tag(obs_id: int, tag_id: int, decision: TagDecision):
 
 
 @app.post("/observations/{obs_id}/tags", status_code=201, tags=["4·教师确认"])
-def add_tag_by_teacher(obs_id: int, payload: TagCreate):
+def add_tag_by_teacher(
+    obs_id: int,
+    payload: TagCreate,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """
     教师自己补一个 AI 没想到的指标。
     source=teacher_added，这类记录用于计算「AI 漏检率」。
@@ -2431,21 +3002,16 @@ def add_tag_by_teacher(obs_id: int, payload: TagCreate):
         raise HTTPException(400, "level 只能是 1、2、3")
 
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
 
-        latest_candidate = s.exec(
-            select(ObservationTag).where(
-                ObservationTag.observation_id == obs_id,
-                ObservationTag.ai_run_id != None,  # noqa: E711
-                ObservationTag.source.in_({"ai_suggested", "system_determined"}),
-            ).order_by(ObservationTag.id.desc())
-        ).first()
+        latest_run = latest_workflow_run(s, obs, "indicator_suggestion")
+        if latest_run and not suggestions_current(s, obs):
+            raise HTTPException(409, "观察内容已更新，请先重新推荐指标")
 
         tag = ObservationTag(
             observation_id=obs_id,
-            ai_run_id=latest_candidate.ai_run_id if latest_candidate else None,
+            ai_run_id=latest_run.id if latest_run else None,
             indicator_code=payload.indicator_code,
             indicator_name=item["name"],
             level=payload.level,
@@ -2468,21 +3034,22 @@ def add_tag_by_teacher(obs_id: int, payload: TagCreate):
     response_model=ObservationDetailResponse,
     tags=["5·成果"],
 )
-def get_observation_detail(obs_id: int):
+def get_observation_detail(
+    obs_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """一条观察记录的完整内容：四段正文 + 素材 + 已采纳的指标"""
     with Session(engine) as s:
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        _, teacher = authenticated_teacher(s, request, authorization)
+        obs = owned_observation(s, teacher, obs_id)
 
         child = s.get(Child, obs.child_id) if obs.child_id is not None else None
         observer = s.get(Teacher, obs.observer_id) if obs.observer_id is not None else None
         area = s.get(Area, obs.area_id)
         room = s.get(ClassRoom, obs.classroom_id) if obs.classroom_id else None
         media = s.exec(select(Media).where(Media.observation_id == obs_id)).all()
-        tags = s.exec(
-            select(ObservationTag).where(ObservationTag.observation_id == obs_id)
-        ).all()
+        tags = current_observation_tags(s, obs)
         child_links = s.exec(
             select(ObservationChild)
             .where(ObservationChild.observation_id == obs_id)
@@ -2512,6 +3079,10 @@ def get_observation_detail(obs_id: int):
 
         return ObservationDetailResponse(
             **obs.model_dump(),
+            observation_mode=run_context(latest_workflow_run(s, obs, "narrative")).get("mode"),
+            narrative_context_changed=narrative_context_changed(s, obs),
+            suggestions_ready=suggestions_current(s, obs),
+            suggestions_stale=bool(latest_workflow_run(s, obs, "indicator_suggestion")) and not suggestions_current(s, obs),
             child_name=child.name if child else None,
             classroom_name=room.name if room else None,
             area_name=area.name if area else None,
@@ -2555,19 +3126,25 @@ def export_observation_data(session: Session, obs: Observation) -> ExportObserva
                 gender=gender,
             ))
 
-    tags = session.exec(
-        select(ObservationTag)
-        .where(
-            ObservationTag.observation_id == obs.id,
-            ObservationTag.accepted == True,  # noqa: E712
-            ObservationTag.source.in_({
-                "system_determined",
-                "ai_suggested",
-                "teacher_added",
-            }),
-        )
-        .order_by(ObservationTag.id)
+    tags = [tag for tag in current_observation_tags(session, obs) if tag.accepted is True]
+
+
+    # 同一记录的照片会全部进入文档；视频各挑若干代表帧。
+    highlight_frames: List[bytes] = []
+    media_items = session.exec(
+        select(Media).where(Media.observation_id == obs.id).order_by(Media.id)
     ).all()
+    for media in media_items:
+        media_path = UPLOAD_DIR / media.stored_filename
+        if not media_path.is_file():
+            continue
+        if media.content_type.startswith("image/"):
+            photo = prepare_export_photo(media_path)
+            if photo:
+                highlight_frames.append(photo)
+        elif media.content_type.startswith("video/"):
+            highlight_frames.extend(extract_highlight_frames(media_path))
+
     return ExportObservation(
         observation_id=obs.id,
         observed_at=obs.observed_at,
@@ -2582,9 +3159,16 @@ def export_observation_data(session: Session, obs: Observation) -> ExportObserva
         analysis=obs.analysis,
         strategy=obs.strategy,
         indicators=[
-            ExportIndicator(code=tag.indicator_code, name=tag.indicator_name, level=tag.level)
+            ExportIndicator(
+                code=tag.indicator_code,
+                name=tag.indicator_name,
+                level=tag.level,
+                level_desc=level_desc(tag.indicator_code, tag.level),
+                evidence=(tag.ai_reason or "") if tag.source != "teacher_added" else "",
+            )
             for tag in tags
         ],
+        highlight_frames=highlight_frames,
     )
 
 
@@ -2596,14 +3180,13 @@ def safe_filename_part(value: str) -> str:
 EXPORT_FORMATS = {
     "docx": (DOCX_MEDIA_TYPE, build_observation_document),
     "pdf": (PDF_MEDIA_TYPE, build_observation_pdf),
-    "md": (MARKDOWN_MEDIA_TYPE, build_observation_markdown),
 }
 
 
 def validate_export_format(value: str) -> str:
     normalized = value.strip().lower()
     if normalized not in EXPORT_FORMATS:
-        raise HTTPException(422, "导出格式只支持 docx、pdf 或 md")
+        raise HTTPException(422, "导出格式只支持 docx、pdf")
     return normalized
 
 
@@ -2632,37 +3215,35 @@ def export_observation(
     obs_id: int,
     request: Request,
     include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
-    export_format: str = Query("docx", alias="format", description="docx / pdf / md"),
+    export_format: str = Query("docx", alias="format", description="docx / pdf"),
     authorization: Optional[str] = Header(None),
 ):
     """导出一条已确认观察记录；缺省保持 Word 行为。"""
     export_format = validate_export_format(export_format)
     with Session(engine) as s:
-        authenticated = authenticated_account(s, request, authorization, required=False)
-        account_id = authenticated[0].id if authenticated else None
-        obs = s.get(Observation, obs_id)
-        if not obs:
-            raise HTTPException(404, "观察记录不存在")
+        account, teacher = authenticated_teacher(s, request, authorization)
+        account_id = account.id
+        obs = owned_observation(s, teacher, obs_id)
         if obs.status != "confirmed":
             raise HTTPException(400, "未确认的记录不能导出")
+        require_analysis_and_strategy(obs)
         record = export_observation_data(s, obs)
 
     local = kindergarten_datetime(record.observed_at)
     names = safe_filename_part(child_names(record) or "未指定幼儿")
     filename = f"{names}_观察记录_{local:%Y%m%d}.{export_format}"
     content, media_type = build_export([record], export_format, include_indicators)
-    if account_id is not None:
-        with Session(engine) as s:
-            s.add(ExportRecord(
-                account_id=account_id,
-                observation_id=obs_id,
-                scope="single",
-                format=export_format,
-                file_name=filename,
-                size=len(content),
-                child_name=child_names(record) or None,
-            ))
-            s.commit()
+    with Session(engine) as s:
+        s.add(ExportRecord(
+            account_id=account_id,
+            observation_id=obs_id,
+            scope="single",
+            format=export_format,
+            file_name=filename,
+            size=len(content),
+            child_name=child_names(record) or None,
+        ))
+        s.commit()
     return export_download(content, filename, media_type, export_format)
 
 
@@ -2672,16 +3253,20 @@ def export_monthly_observations(
     year: int = Query(..., ge=2000, le=2100),
     month: int = Query(..., ge=1, le=12),
     include_indicators: bool = Query(False, description="是否在观察分析末尾附带已采纳指标"),
-    export_format: str = Query("docx", alias="format", description="docx / pdf / md"),
+    export_format: str = Query("docx", alias="format", description="docx / pdf"),
     authorization: Optional[str] = Header(None),
 ):
     """导出指定北京时间月份内的全部已确认观察记录。"""
     export_format = validate_export_format(export_format)
     with Session(engine) as s:
-        authenticated = authenticated_account(s, request, authorization, required=False)
-        account_id = authenticated[0].id if authenticated else None
+        account, teacher = authenticated_teacher(s, request, authorization)
+        account_id = account.id
         confirmed = s.exec(
-            select(Observation).where(Observation.status == "confirmed")
+            select(Observation).where(
+                Observation.status == "confirmed",
+                Observation.observer_id == teacher.id,
+                Observation.classroom_id == teacher.classroom_id,
+            )
         ).all()
         selected = [
             obs for obs in confirmed
@@ -2693,23 +3278,24 @@ def export_monthly_observations(
         selected.sort(key=lambda obs: kindergarten_datetime(obs.observed_at))
         if not selected:
             raise HTTPException(404, f"{year}年{month}月没有已确认的观察记录")
+        for obs in selected:
+            require_analysis_and_strategy(obs)
         records = [export_observation_data(s, obs) for obs in selected]
 
     observer_name = safe_filename_part(records[0].observer_name or "未填写")
     filename = f"自主游戏观察记录_{year}年{month}月_{observer_name}.{export_format}"
     content, media_type = build_export(records, export_format, include_indicators)
-    if account_id is not None:
-        with Session(engine) as s:
-            s.add(ExportRecord(
-                account_id=account_id,
-                observation_id=None,
-                scope="monthly",
-                format=export_format,
-                file_name=filename,
-                size=len(content),
-                child_name=None,
-            ))
-            s.commit()
+    with Session(engine) as s:
+        s.add(ExportRecord(
+            account_id=account_id,
+            observation_id=None,
+            scope="monthly",
+            format=export_format,
+            file_name=filename,
+            size=len(content),
+            child_name=None,
+        ))
+        s.commit()
     return export_download(content, filename, media_type, export_format)
 
 
@@ -2747,7 +3333,10 @@ def export_history(
 
 
 @app.get("/metrics/ai-quality", tags=["5·成果"])
-def ai_quality():
+def ai_quality(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
     """
     AI 效果指标 —— 本项目最核心的三个数字，全部来自 observationtag 表。
 
@@ -2756,8 +3345,19 @@ def ai_quality():
       分维度采纳率 = AI 在哪些维度准、哪些不准 → 下一轮优化方向
     """
     with Session(engine) as s:
-        tags = s.exec(select(ObservationTag)).all()
-        runs = s.exec(select(AIRun)).all()
+        _, teacher = authenticated_teacher(s, request, authorization)
+        observation_ids = select(Observation.id).where(
+            Observation.observer_id == teacher.id,
+            Observation.classroom_id == teacher.classroom_id,
+        )
+        tags = s.exec(
+            select(ObservationTag).where(
+                ObservationTag.observation_id.in_(observation_ids)
+            )
+        ).all()
+        runs = s.exec(
+            select(AIRun).where(AIRun.observation_id.in_(observation_ids))
+        ).all()
 
     def quality_summary(group_tags):
         ai_tags = [t for t in group_tags if t.source == "ai_suggested"]

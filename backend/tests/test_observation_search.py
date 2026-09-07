@@ -16,7 +16,17 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 import main
-from models import Area, Child, ClassRoom, Observation, ObservationChild, Teacher
+from models import (
+    Account,
+    Area,
+    Child,
+    ClassRoom,
+    Kindergarten,
+    Observation,
+    ObservationChild,
+    ObservationTag,
+    Teacher,
+)
 
 UTC = timezone.utc
 
@@ -51,9 +61,16 @@ class ObservationSearchTest(unittest.TestCase):
         with Session(engine) as session:
             self.block_area = Area(code="construction", name="建构区")
             self.role_area = Area(code="role", name="角色区")
-            room = ClassRoom(name="中二班", age_group="middle")
+            kindergarten = Kindergarten(name="测试幼儿园")
             session.add(self.block_area)
             session.add(self.role_area)
+            session.add(kindergarten)
+            session.flush()
+            room = ClassRoom(
+                name="中二班",
+                age_group="middle",
+                kindergarten_id=kindergarten.id,
+            )
             session.add(room)
             session.commit()
             session.refresh(self.block_area)
@@ -67,12 +84,23 @@ class ObservationSearchTest(unittest.TestCase):
             session.add(self.child_b)
             session.commit()
             session.refresh(self.teacher)
+            self.teacher_id = self.teacher.id
             session.refresh(self.child_a)
             session.refresh(self.child_b)
+            account = Account(
+                phone="13800008888",
+                teacher_id=self.teacher.id,
+                kindergarten_id=kindergarten.id,
+            )
+            session.add(account)
+            session.flush()
+            token = main.issue_session(session, account)
+            session.commit()
             self.area_id = self.block_area.id
             self.role_area_id = self.role_area.id
             self.child_a_id = self.child_a.id
             self.child_b_id = self.child_b.id
+            self.client.headers.update({"Authorization": f"Bearer {token}"})
 
     def tearDown(self):
         self.ai_mode_patcher.stop()
@@ -93,7 +121,7 @@ class ObservationSearchTest(unittest.TestCase):
                 child_id=child_id,
                 area_id=area_id if area_id is not None else self.area_id,
                 classroom_id=1,
-                observer_id=self.teacher.id,
+                observer_id=self.teacher_id,
                 observed_at=observed_at,
                 age_group="middle",
                 status=status,
@@ -252,7 +280,7 @@ class ObservationSearchTest(unittest.TestCase):
             "/observations", params={"child_id": 999999}
         )
         self.assertEqual(missing_child.status_code, 404)
-        self.assertIn("999999", missing_child.json()["detail"])
+        self.assertEqual(missing_child.json()["detail"], "幼儿不存在")
 
         missing_area = self.client.get(
             "/observations", params={"area_id": 999999}

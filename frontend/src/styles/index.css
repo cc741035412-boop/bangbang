@@ -1,10 +1,12 @@
 @import "tailwindcss";
 
 @theme {
-  --color-canvas: #efeee9;
-  --color-surface: #fffefa;
-  --color-ink: #242520;
-  --color-ink-muted: #676960;
+  --color-canvas: #f6f1e7;
+  --color-surface: #fffdf6;
+  --color-paper-soft: #efe8da;
+  --color-paper-edge: #e6ddce;
+  --color-ink: #23251f;
+  --color-ink-muted: #6c6a5f;
   --color-brand: #31745a;
   --color-brand-deep: #225440;
   --color-brand-soft: #dcebe3;
@@ -25,7 +27,11 @@
     margin: 0;
     min-width: 320px;
     min-height: 100vh;
-    background: var(--color-canvas);
+    background-color: var(--color-canvas);
+    /* 暖米纸张感：顶部一道极淡的柔光 + 一层几乎看不见的纸纹颗粒 */
+    background-image:
+      radial-gradient(130% 100% at 50% -20%, rgba(255, 253, 246, 0.5), transparent 60%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
     font-family: var(--font-sans);
     color: var(--color-ink);
   }

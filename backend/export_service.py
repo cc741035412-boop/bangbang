@@ -22,6 +22,7 @@ from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    Image as ReportLabImage,
     KeepTogether,
     PageBreak,
     Paragraph,
@@ -60,6 +61,10 @@ class ExportIndicator:
     code: str
     name: str
     level: int
+    # 该层级的发展锚点描述（如"能持续进行身体操作（每次 30 分钟以上）…"）
+    level_desc: str = ""
+    # 白描原文回溯到的行为证据（如"白描原文：幼儿X持续搭高…"）
+    evidence: str = ""
 
 
 @dataclass
@@ -77,6 +82,8 @@ class ExportObservation:
     analysis: Optional[str] = None
     strategy: Optional[str] = None
     indicators: List[ExportIndicator] = field(default_factory=list)
+    # 上传照片与视频代表帧，导出时统一作为现场影像展示。
+    highlight_frames: List[bytes] = field(default_factory=list)
 
 
 def kindergarten_datetime(value: datetime) -> datetime:
@@ -132,9 +139,16 @@ def child_genders(record: ExportObservation) -> str:
     return _collapse_same(values)
 
 
+def _indicator_detail(item: ExportIndicator) -> str:
+    text = f"{item.code} {item.name}·{LEVEL_LABELS.get(item.level, f'第{item.level}阶')}"
+    if item.level_desc:
+        text += f"：{item.level_desc}"
+    return text
+
+
 def indicator_text(indicators: List[ExportIndicator]) -> str:
     items = [
-        f"{item.code} {item.name}·{LEVEL_LABELS.get(item.level, f'第{item.level}阶')}"
+        _indicator_detail(item) + (f"（行为证据：{item.evidence}）" if item.evidence else "")
         for item in indicators
     ]
     return f"【关联指标】{'；'.join(items)}" if items else ""
@@ -150,10 +164,12 @@ def observation_date(record: ExportObservation) -> str:
 
 
 def indicator_lines(indicators: List[ExportIndicator]) -> List[str]:
-    return [
-        f"{item.code} {item.name}·{LEVEL_LABELS.get(item.level, f'第{item.level}阶')}"
-        for item in indicators
-    ]
+    lines: List[str] = []
+    for item in indicators:
+        lines.append(_indicator_detail(item))
+        if item.evidence:
+            lines.append(f"　行为证据：{item.evidence}")
+    return lines
 
 
 def build_observation_markdown(
@@ -280,6 +296,27 @@ def _pdf_styles():
     }
 
 
+def _pdf_photo_flowables(record: ExportObservation, styles):
+    """在 PDF 里把现场照片/视频代表帧放在记录偏前的位置；图片异常会跳过。"""
+    out = []
+    if not record.highlight_frames:
+        return out
+    try:
+        from PIL import Image as PILImage
+        out.append(Paragraph("▸ 现场影像", styles["section"]))
+        for frame in record.highlight_frames:
+            try:
+                img = PILImage.open(BytesIO(frame))
+                width = 6 * cm
+                height = width * (img.size[1] / img.size[0]) if img.size[0] else width
+                out.append(ReportLabImage(BytesIO(frame), width=width, height=height))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
 def _pdf_record_flowables(record: ExportObservation, include_indicators: bool, styles):
     basics = [
         ("幼儿", child_names(record)),
@@ -318,6 +355,7 @@ def _pdf_record_flowables(record: ExportObservation, include_indicators: bool, s
         info_table,
         Spacer(1, 8),
     ]
+    story.extend(_pdf_photo_flowables(record, styles))
     for heading, content in (
         ("观察目的", record.purpose),
         ("观察记录", record.narrative),
@@ -524,9 +562,9 @@ def _add_record_table(
 
     body_rows = (
         (4, "观察目的", record.purpose),
-        (5, "观察描述", record.narrative),
+        (5, "观察记录", record.narrative),
         (6, "观察分析", record.analysis),
-        (7, "措施", record.strategy),
+        (7, "下一步支持策略", record.strategy),
     )
     for row_index, label, value in body_rows:
         _set_cell_text(table.cell(row_index, 0), label, bold=True, center=True)
@@ -537,6 +575,19 @@ def _add_record_table(
         appended = indicator_text(record.indicators)
         if appended:
             _append_cell_paragraph(table.cell(6, 1), appended)
+
+    # 把上传照片与视频代表帧放进「观察记录」单元格（表格内，靠后不突兀）。
+    # 图片异常时跳过插入，避免坏图让整份导出失败。
+    if record.highlight_frames:
+        cell = table.cell(5, 1)
+        try:
+            cap = cell.add_paragraph()
+            cap.add_run("▸ 现场影像")
+            for frame in record.highlight_frames:
+                pic = cell.add_paragraph()
+                pic.add_run().add_picture(BytesIO(frame), width=Cm(10))
+        except Exception:
+            pass
 
 
 def build_observation_document(

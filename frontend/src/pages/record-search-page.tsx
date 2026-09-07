@@ -7,6 +7,7 @@ import {
   useAllMedia,
   useAreas,
   useChildren,
+  useIndicators,
   useObservationSearch,
   type Observation,
   type ObservationSearchFilters,
@@ -42,6 +43,7 @@ export function RecordSearchPage() {
   const [childId, setChildId] = useState("");
   const [areaId, setAreaId] = useState("");
   const [status, setStatus] = useState<Observation["status"] | "">("");
+  const [indicatorCode, setIndicatorCode] = useState("");
   const [dateMode, setDateMode] = useState<DateMode>("all");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
@@ -70,13 +72,15 @@ export function RecordSearchPage() {
     child_id: childId === "" ? undefined : Number(childId),
     area_id: areaId === "" ? undefined : Number(areaId),
     status: status === "" ? undefined : status,
+    indicator_code: indicatorCode || undefined,
     date_from: dateRange.from || undefined,
     date_to: dateRange.to || undefined,
-  }), [childId, areaId, status, dateRange.from, dateRange.to]);
+  }), [childId, areaId, status, indicatorCode, dateRange.from, dateRange.to]);
 
   const observations = useObservationSearch(filters);
   const areas = useAreas();
   const children = useChildren();
+  const indicators = useIndicators();
   const media = useAllMedia();
 
   const areaNames = useMemo(
@@ -106,16 +110,20 @@ export function RecordSearchPage() {
   const groups = useMemo(() => groupByDate(sorted), [sorted]);
 
   const isLoading = (
-    observations.isLoading || areas.isLoading || children.isLoading || media.isLoading
+    observations.isLoading || areas.isLoading || children.isLoading
+    || indicators.isLoading || media.isLoading
   );
-  const hasError = observations.isError || areas.isError || children.isError || media.isError;
+  const hasError = observations.isError || areas.isError || children.isError
+    || indicators.isError || media.isError;
 
-  const isFiltering = childId !== "" || areaId !== "" || status !== "" || dateMode !== "all";
+  const isFiltering = childId !== "" || areaId !== "" || status !== ""
+    || indicatorCode !== "" || dateMode !== "all";
 
   function resetFilters() {
     setChildId("");
     setAreaId("");
     setStatus("");
+    setIndicatorCode("");
     setDateMode("all");
     setCustomFrom("");
     setCustomTo("");
@@ -165,6 +173,23 @@ export function RecordSearchPage() {
                 onChange={(value) => setStatus(value as Observation["status"] | "")}
                 options={STATUS_OPTIONS}
                 value={status}
+              />
+            </Field>
+          </div>
+
+          <div className="mt-3">
+            <Field label="观察指标">
+              <Select
+                aria-label="观察指标"
+                onChange={setIndicatorCode}
+                options={[
+                  { value: "", label: "全部指标" },
+                  ...(indicators.data ?? []).map((indicator) => ({
+                    value: indicator.indicator_code,
+                    label: `${indicator.indicator_code} ${indicator.indicator_name} · ${indicator.level_label}`,
+                  })),
+                ]}
+                value={indicatorCode}
               />
             </Field>
           </div>
@@ -226,7 +251,7 @@ export function RecordSearchPage() {
         </section>
 
         <p className="mb-3 mt-6 text-sm text-[#8b9994]">
-          共 {records.length} 条记录 · 最新的在最上面
+          已加载 {records.length} 条记录 · 最新的在最上面
         </p>
 
         {isLoading && <p className="py-20 text-center text-sm text-ink-muted">正在检索记录…</p>}
@@ -237,6 +262,7 @@ export function RecordSearchPage() {
               void observations.refetch();
               void areas.refetch();
               void children.refetch();
+              void indicators.refetch();
               void media.refetch();
             }}
             type="button"
@@ -255,7 +281,7 @@ export function RecordSearchPage() {
         )}
 
         <div className="space-y-6">
-          {groups.map(({ dateKey, records: dayRecords }) => (
+          {groups.map(({ dateKey, records: dayRecords }) => dayRecords[0] && (
             <section key={dateKey}>
               <h2 className="mb-3 text-base font-medium text-[#8b9994]">
                 {formatKindergartenDate(dayRecords[0].observed_at)}
@@ -279,6 +305,17 @@ export function RecordSearchPage() {
             </section>
           ))}
         </div>
+
+        {!hasError && observations.hasNextPage && (
+          <button
+            className="mt-6 min-h-12 w-full rounded-2xl border border-brand/25 bg-white font-bold text-brand disabled:text-ink-muted"
+            disabled={observations.isFetchingNextPage}
+            onClick={() => void observations.fetchNextPage()}
+            type="button"
+          >
+            {observations.isFetchingNextPage ? "正在加载…" : "加载更多记录"}
+          </button>
+        )}
       </main>
     </MobilePage>
   );
